@@ -1,0 +1,74 @@
+/* Hallmark - macrostructure: Workbench - tone: utilitarian technical workbench - anchor hue: cobalt */
+:root {
+  --color-paper: oklch(98.2% 0.006 245);
+  --color-paper-2: oklch(96.2% 0.012 245);
+  --color-paper-3: oklch(93.5% 0.018 245);
+  --color-panel: oklch(99.4% 0.003 245);
+  --color-ink: oklch(24% 0.025 255);
+  --color-ink-2: oklch(39% 0.032 255);
+  --color-muted: oklch(57% 0.026 255);
+  --color-rule: oklch(87% 0.022 250);
+  --color-rule-strong: oklch(78% 0.032 250);
+  --color-accent: oklch(55% 0.19 265);
+  --color-accent-strong: oklch(46% 0.21 265);
+  --color-accent-soft: oklch(93% 0.045 265);
+  --color-accent-ink: oklch(99% 0.003 265);
+  --color-success: oklch(54% 0.145 151);
+  --color-success-soft: oklch(93% 0.045 151);
+  --color-success-ink: oklch(99% 0.003 151);
+  --color-success-rule: oklch(86% 0.055 151);
+  --color-error: oklch(55% 0.19 27);
+  --color-error-soft: oklch(94% 0.045 27);
+  --color-error-rule: oklch(86% 0.055 27);
+  --color-warning: oklch(68% 0.15 78);
+  --color-warning-soft: oklch(95% 0.045 82);
+  --color-warning-rule: oklch(86% 0.055 78);
+  --color-focus: oklch(60% 0.19 265);
+  --color-overlay: oklch(24% 0.025 255 / 0.18);
+  --color-accent-rule: oklch(86% 0.055 265);
+  --color-dark-rule: oklch(65% 0.02 255 / 0.5);
+  --color-dark-rule-soft: oklch(65% 0.02 255 / 0.28);
+  --color-event-ink: oklch(86% 0.15 80);
+
+  --font-display: var(--font-display-face), "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-body: var(--font-body-face), "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-mono: var(--font-mono-face), "JetBrains Mono", "Cascadia Mono", monospace;
+
+  --space-1: 0.25rem;
+  --space-pixel: 0.0625rem;
+  --space-half: 0.125rem;
+  --space-1-5: 0.375rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+
+  --text-xs: 0.6875rem;
+  --text-sm: 0.8125rem;
+  --text-md: 0.9375rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+
+  --topbar-height: 60px;
+  --activity-width: 52px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-pill: 999px;
+  --rule-thin: 1px solid var(--color-rule);
+  --shadow-panel: 0 16px 36px -30px oklch(24% 0.025 255 / 0.6);
+  --shadow-float: 0 18px 36px -18px oklch(24% 0.025 255 / 0.28);
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-instant: 0ms;
+  --dur-fast: 120ms;
+  --dur-standard: 180ms;
+  --dur-slow: 280ms;
+}

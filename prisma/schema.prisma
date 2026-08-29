@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model ScheduleDocument {
+  id                      String    @id @default("default")
+  draftConfig             Json
+  publishedConfig         Json
+  previousPublishedConfig Json?
+  draftVersion            Int       @default(1)
+  publishedVersion        Int       @default(1)
+  publishedAt             DateTime?
+  draftUpdatedAt          DateTime  @default(now())
+  temporaryAdjustment     Json?
+  temporaryAdjustmentVersion Int      @default(0)
+  temporaryAdjustmentUpdatedAt DateTime?
+  temporaryAdjustmentPublishedAt DateTime?
+  temporaryAdjustmentPublishedConfig Json?
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  revisions ScheduleRevision[]
+
+  @@map("class_schedule_documents")
+}
+
+model ScheduleRevision {
+  id               Int              @id @default(autoincrement())
+  documentId       String           @default("default")
+  draftVersion     Int
+  publishedVersion Int?
+  config           Json
+  source           String
+  note             String?
+  createdAt        DateTime         @default(now())
+  document         ScheduleDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId, createdAt])
+  @@map("class_schedule_revisions")
+}
+
+model DingTalkUser {
+  id            String   @id @default(cuid())
+  corpId        String
+  userId        String
+  unionId       String
+  name          String
+  title         String?
+  avatarUrl     String?  @db.Text
+  isAdmin       Boolean  @default(false)
+  isBoss        Boolean  @default(false)
+  isSenior      Boolean  @default(false)
+  lastLoginAt   DateTime?
+  lastSyncedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  sessions      AuthSession[]
+  policies      EditorAccessPolicy[] @relation("PolicyUpdatedBy")
+  presences     EditorPresence[]
+
+  @@unique([corpId, userId])
+  @@unique([corpId, unionId])
+  @@index([title])
+  @@map("class_schedule_dingtalk_users")
+}
+
+model EditorPresence {
+  id          String       @id @default(cuid())
+  userId      String
+  presenceId  String
+  lastSeenAt  DateTime
+  createdAt   DateTime     @default(now())
+  user        DingTalkUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, presenceId])
+  @@index([lastSeenAt])
+  @@map("class_schedule_editor_presences")
+}
+
+model AuthSession {
+  tokenHash  String       @id @db.Char(64)
+  userId     String
+  expiresAt  DateTime
+  createdAt  DateTime     @default(now())
+  user       DingTalkUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("class_schedule_auth_sessions")
+}
+
+model EditorAccessPolicy {
+  id              String        @id @default("default")
+  editorTitles    Json
+  updatedByUserId String?
+  updatedAt       DateTime      @updatedAt
+  createdAt       DateTime      @default(now())
+  updatedBy       DingTalkUser? @relation("PolicyUpdatedBy", fields: [updatedByUserId], references: [id], onDelete: SetNull)
+
+  @@map("class_schedule_editor_access_policies")
+}
