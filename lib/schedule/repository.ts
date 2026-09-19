@@ -6,7 +6,6 @@ import {
   getEffectiveScheduleConfig,
   getScheduleWeekWindow,
   isAdjustmentActive,
-  mergeAdjustmentChangedCells,
   parseScheduleAdjustment,
   validateAdjustmentConfig,
 } from "./adjustment";
@@ -179,9 +178,6 @@ export async function saveTemporaryAdjustment(
         ? activeAdjustment
         : null
     : null;
-  if (!continuingAdjustment && sourceDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
-  }
   if (continuingAdjustment && weekIndex !== continuingAdjustment.weekIndex) {
     return {
       conflict: false as const,
@@ -189,7 +185,10 @@ export async function saveTemporaryAdjustment(
       issues: [{ path: "weekIndex", message: `本周调课已锁定为第 ${continuingAdjustment.weekIndex + 1} 周` }],
     };
   }
-  const baseConfig = continuingAdjustment ? continuingAdjustment.config : asConfig(document.draftConfig);
+  if (sourceDraftVersion !== document.draftVersion) {
+    return { conflict: true as const, current: await getScheduleDocumentView() };
+  }
+  const baseConfig = asConfig(document.draftConfig);
   const adjustmentValidation = validateAdjustmentConfig(baseConfig, normalized, weekIndex);
   if (!adjustmentValidation.success) {
     return { conflict: false as const, invalid: true as const, issues: adjustmentValidation.issues };
@@ -200,16 +199,13 @@ export async function saveTemporaryAdjustment(
     weekIndex,
     sourceDraftVersion,
     config: normalized,
-    changedCells: mergeAdjustmentChangedCells(
-      continuingAdjustment?.changedCells ?? [],
-      getAdjustmentChangedCells(baseConfig, normalized, weekIndex),
-    ),
+    changedCells: getAdjustmentChangedCells(baseConfig, normalized, weekIndex),
   };
   const updateWhere: Prisma.ScheduleDocumentWhereInput = {
     id: DOCUMENT_ID,
     temporaryAdjustmentVersion: expectedVersion,
+    draftVersion: sourceDraftVersion,
   };
-  if (!continuingAdjustment) updateWhere.draftVersion = sourceDraftVersion;
   const updatedCount = await prisma.scheduleDocument.updateMany({
     where: updateWhere,
     data: {

@@ -1,18 +1,10 @@
-import { DingTalkAuth } from "@/components/dingtalk-auth";
 import { ScheduleViewer } from "@/components/schedule-viewer";
-import { getCurrentUser, toPublicUser } from "@/lib/auth";
 import { getDingTalkPublicConfig } from "@/lib/dingtalk";
 import { getPublishedConfig } from "@/lib/schedule/repository";
 
 export const dynamic = "force-dynamic";
 
 export default async function HomePage() {
-  const user = await getCurrentUser();
-  if (!user) {
-    const config = getDingTalkPublicConfig();
-    return <DingTalkAuth {...config} />;
-  }
-
   let config;
   try {
     config = await getPublishedConfig();
@@ -25,5 +17,6 @@ export default async function HomePage() {
       </main>
     );
   }
-  return <ScheduleViewer config={config} user={toPublicUser(user)} />;
+  return <ScheduleViewer config={config} auth={getDingTalkPublicConfig()} />;
 }
+

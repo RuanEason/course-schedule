@@ -3,6 +3,7 @@ import {
   getCourseForWeek,
   setCourseForWeek,
   type CourseValue,
+  PLACEHOLDER_SUBJECT_CODE,
   PLACEHOLDER_SUBJECT_NAME,
   type ScheduleConfig,
   type TemplateRow,
@@ -157,9 +158,37 @@ export function renameTemplate(config: ScheduleConfig, oldName: string, newName:
   return next;
 }
 
-export function removeTemplate(config: ScheduleConfig, templateName: string): ScheduleConfig {
-  if (config.daily_class.some((day) => day.timetable === templateName)) return config;
+export function suggestTemplateCopyName(existingNames: readonly string[], sourceName: string): string {
+  const base = `${sourceName} 副本`;
+  if (!existingNames.includes(base)) return base;
+  let index = 2;
+  while (existingNames.includes(`${base} ${index}`)) index += 1;
+  return `${base} ${index}`;
+}
+
+export function duplicateTemplate(config: ScheduleConfig, sourceName: string, newName: string): ScheduleConfig {
+  const normalizedName = newName.trim();
+  const source = config.timetable[sourceName];
+  if (!source || !normalizedName || config.timetable[normalizedName]) return config;
   const next = cloneConfig(config);
+  next.timetable[normalizedName] = { ...source };
+  next.divider[normalizedName] = [...(next.divider[sourceName] ?? [])];
+  return next;
+}
+
+export function removeTemplate(config: ScheduleConfig, templateName: string, replacementName?: string): ScheduleConfig {
+  if (!config.timetable[templateName]) return config;
+  if (Object.keys(config.timetable).length <= 1) return config;
+  const used = config.daily_class.some((day) => day.timetable === templateName);
+  const replacement = replacementName?.trim();
+  if (used && (!replacement || replacement === templateName || !config.timetable[replacement])) return config;
+
+  let next = cloneConfig(config);
+  if (used && replacement) {
+    next.daily_class.forEach((day, dayIndex) => {
+      if (day.timetable === templateName) next = assignDayTemplate(next, dayIndex, replacement, PLACEHOLDER_SUBJECT_CODE);
+    });
+  }
   delete next.timetable[templateName];
   delete next.divider[templateName];
   return next;

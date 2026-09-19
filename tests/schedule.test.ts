@@ -9,6 +9,7 @@ import {
   previewAutoArrange,
 } from "@/lib/schedule/auto-arrange";
 import {
+  applyAdjustmentOverlay,
   getAdjustmentChangedCells,
   getEffectiveScheduleConfig,
   getScheduleWeekWindow,
@@ -21,6 +22,9 @@ import { diffScheduleConfigs } from "@/lib/schedule/diff";
 import {
   addTemplateRow,
   assignDayTemplate,
+  duplicateTemplate,
+  removeTemplate,
+  suggestTemplateCopyName,
   setDayCourse,
   swapDayCourses,
   updateSubject,
@@ -32,7 +36,21 @@ import {
   parseSubjectCode,
   validateSubjectCodeFields,
 } from "@/lib/schedule/subject-code";
-import { PLACEHOLDER_SUBJECT_CODE } from "@/lib/schedule/types";
+import { PLACEHOLDER_SUBJECT_CODE, getCourseForWeek, type TemplateRow } from "@/lib/schedule/types";
+import {
+  buildOccupancyHint,
+  clampMove,
+  clampResize,
+  computeOccupancyViewport,
+  findNearestGaps,
+  findOverlap,
+  findPlacementOptions,
+  gapContaining,
+  getOccupiedRanges,
+  placeRangeAt,
+  stepEdge,
+  suggestNextFreeSlot,
+} from "@/lib/schedule/time-occupancy";
 import { validateScheduleConfig } from "@/lib/schedule/validation";
 
 function loadLegacyConfig() {
@@ -196,6 +214,33 @@ describe("editor operations", () => {
     expect(next.daily_class[0].classList).toHaveLength(3);
   });
 
+  it("duplicates a template with its schedule and divider settings", () => {
+    const config = createBlankConfig();
+    config.divider.workday = [0, 1];
+
+    const name = suggestTemplateCopyName(Object.keys(config.timetable), "workday");
+    const next = duplicateTemplate(config, "workday", name);
+
+    expect(name).toBe("workday 副本");
+    expect(next.timetable[name]).toEqual(config.timetable.workday);
+    expect(next.divider[name]).toEqual([0, 1]);
+    expect(next.timetable.workday).toEqual(config.timetable.workday);
+    expect(next.daily_class.every((day) => day.timetable !== name)).toBe(true);
+  });
+
+  it("removes an unused template and can reassign days when deleting a used one", () => {
+    const config = createBlankConfig();
+    const withCopy = duplicateTemplate(config, "weekend", "weekend-extra");
+
+    expect(removeTemplate(withCopy, "weekend-extra").timetable["weekend-extra"]).toBeUndefined();
+    expect(removeTemplate(config, "workday")).toBe(config);
+
+    const reassigned = removeTemplate(config, "workday", "weekend");
+    expect(reassigned.timetable.workday).toBeUndefined();
+    expect(reassigned.daily_class.filter((day) => day.timetable === "weekend")).toHaveLength(7);
+    expect(reassigned.daily_class[1].classList).toHaveLength(2);
+  });
+
   it("keeps a day valid when switching templates and switching back", () => {
     const config = createBlankConfig();
     delete config.subject_name[PLACEHOLDER_SUBJECT_CODE];
@@ -273,6 +318,29 @@ describe("temporary schedule adjustments", () => {
 
     expect(getEffectiveScheduleConfig(published, adjustment, new Date("2026-08-28T04:00:00.000Z")).daily_class[1].classList[0]).toBe("EN");
     expect(getEffectiveScheduleConfig(published, adjustment, new Date("2026-08-30T16:00:00.000Z")).daily_class[1].classList[0]).toBe("TBD");
+  });
+
+  it("keeps a later permanent edit and replays only the adjusted cells", () => {
+    const original = createBlankConfig();
+    const temporary = setAdjustmentCourse(original, 1, 0, 0, "EN");
+    const adjustment = {
+      weekStart: "2026-08-24",
+      weekIndex: 0,
+      sourceDraftVersion: 1,
+      config: temporary,
+      changedCells: [{ dayIndex: 1, classIndex: 0 }],
+    };
+    const permanent = createBlankConfig();
+    permanent.daily_class[1].classList[1] = "MA";
+    permanent.daily_class[2].classList[0] = "CH";
+
+    const rebased = applyAdjustmentOverlay(permanent, adjustment);
+
+    expect(getCourseForWeek(rebased.daily_class[1].classList[0], 0)).toBe("EN");
+    expect(rebased.daily_class[1].classList[1]).toBe("MA");
+    expect(rebased.daily_class[2].classList[0]).toBe("CH");
+    expect(getEffectiveScheduleConfig(permanent, adjustment, new Date("2026-08-28T04:00:00.000Z")).daily_class[1].classList[1]).toBe("MA");
+    expect(getEffectiveScheduleConfig(permanent, adjustment, new Date("2026-08-28T04:00:00.000Z")).daily_class[2].classList[0]).toBe("CH");
   });
 });
 
@@ -471,5 +539,115 @@ describe("automatic timetable arrangement", () => {
     expect(preview.preservedCourseCount).toBe(1);
     expect(preview.discardedCourseCount).toBe(1);
     expect(preview.addedPlaceholderCount).toBe(0);
+  });
+});
+
+describe("time occupancy", () => {
+  function row(timeRange: string, kind: TemplateRow["kind"] = "class", classIndex = 0, eventLabel = "课间"): TemplateRow {
+    return kind === "class"
+      ? { timeRange, kind, classIndex }
+      : { timeRange, kind, eventLabel };
+  }
+
+  const rows = [
+    row("08:00-08:39", "class", 0),
+    row("08:40-08:49", "event"),
+    row("08:50-09:29", "class", 1),
+  ];
+
+  it("hides the row being edited and names the overlapping block", () => {
+    const occupied = getOccupiedRanges(rows, "08:00-08:39");
+
+    expect(occupied.map((item) => item.timeRange)).toEqual(["08:40-08:49", "08:50-09:29"]);
+    expect(findOverlap(occupied, "08:45-09:00")?.label).toBe("课间");
+    expect(findOverlap(occupied, "09:30-10:09")).toBeNull();
+    expect(buildOccupancyHint({
+      draft: { start: 8 * 60 + 45, end: 9 * 60 },
+      overlap: findOverlap(occupied, "08:45-09:00"),
+      occupied,
+    })).toContain("课间");
+    expect(buildOccupancyHint({
+      draft: { start: 9 * 60 + 30, end: 10 * 60 + 9 },
+      overlap: null,
+      occupied,
+    })).toContain("分钟");
+  });
+
+  it("offers nearby free slots that do not overlap occupied time", () => {
+    const occupied = getOccupiedRanges(rows);
+    const options = findPlacementOptions(occupied, 40, 10 * 60);
+
+    expect(options.map((option) => option.timeRange)).toEqual([
+      "09:30-10:09",
+      "07:20-07:59",
+    ]);
+    for (const option of options) {
+      expect(findOverlap(occupied, option)).toBeNull();
+    }
+  });
+
+  it("uses a short interior gap when the current duration does not fit", () => {
+    const occupied = getOccupiedRanges([
+      row("08:00-08:39", "class", 0),
+      row("08:50-09:29", "class", 1),
+    ]);
+    const options = findPlacementOptions(occupied, 40, 8 * 60 + 20);
+
+    expect(options.some((option) => option.timeRange === "08:40-08:49")).toBe(true);
+    expect(options.every((option) => findOverlap(occupied, option) === null)).toBe(true);
+  });
+
+  it("suggests the next free slot and the gaps around a draft", () => {
+    expect(suggestNextFreeSlot([])).toBe("08:00-08:39");
+    expect(suggestNextFreeSlot(rows)).toBe("09:30-10:09");
+    expect(findNearestGaps(getOccupiedRanges(rows), { start: 9 * 60 + 30, end: 10 * 60 + 9 })).toEqual({
+      beforeEnd: 9 * 60 + 29,
+      afterStart: null,
+    });
+  });
+
+  it("zooms the occupancy bar around the draft instead of the whole day", () => {
+    const occupied = getOccupiedRanges([
+      row("06:30-07:00", "event", 0, "晨练"),
+      row("08:00-08:39", "class", 0),
+      row("21:00-23:59", "event", 0, "放学"),
+    ]);
+
+    const viewport = computeOccupancyViewport(occupied, { start: 7 * 60 + 1, end: 7 * 60 + 31 });
+
+    expect(viewport.start).toBeGreaterThanOrEqual(6 * 60);
+    expect(viewport.end).toBeLessThan(12 * 60);
+  });
+
+  it("keeps dragged and stepped ranges out of occupied time", () => {
+    const occupied = getOccupiedRanges([
+      row("08:00-08:39", "class", 0),
+      row("09:30-10:09", "class", 1),
+    ]);
+    const gap = gapContaining(occupied, 8 * 60 + 50);
+
+    expect(gap).toEqual({ start: 8 * 60 + 40, end: 9 * 60 + 29 });
+    expect(clampMove(gap!, 8 * 60 + 40, 9 * 60 + 19, 30)).toEqual({ start: 8 * 60 + 50, end: 9 * 60 + 29 });
+    expect(clampResize(gap!, 8 * 60 + 40, 9 * 60 + 19, "end", 10 * 60).end).toBe(9 * 60 + 29);
+
+    const placed = placeRangeAt(occupied, 8 * 60 + 45, 40);
+    expect(placed).toEqual({ start: 8 * 60 + 45, end: 9 * 60 + 24 });
+    expect(findOverlap(occupied, placed!)).toBeNull();
+
+    const stepped = stepEdge(occupied, { start: 8 * 60 + 40, end: 9 * 60 + 19 }, "end", 100);
+    expect(stepped).toEqual({ start: 8 * 60 + 40, end: 9 * 60 + 29 });
+    expect(findOverlap(occupied, stepped)).toBeNull();
+  });
+
+  it("suggests a daytime gap instead of midnight when the evening is full", () => {
+    const occupiedRows = [
+      row("06:30-07:00", "event", 0, "晨练"),
+      row("08:00-08:39", "class", 0),
+      row("21:00-23:59", "event", 0, "放学"),
+    ];
+    const next = suggestNextFreeSlot(occupiedRows);
+
+    expect(next).toBe("08:40-09:19");
+    expect(findOverlap(getOccupiedRanges(occupiedRows), next)).toBeNull();
   });
 });

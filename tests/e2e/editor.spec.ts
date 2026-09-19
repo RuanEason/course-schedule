@@ -10,6 +10,7 @@ async function openEditor(page: Page) {
 test("authenticated editor shows the current local mock user", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "课程表" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "正在验证身份" })).toBeVisible();
   const avatar = page.getByRole("button", { name: "当前用户头像" });
   await expect(avatar).toBeVisible();
   await expect(page.getByText(/本地测试用户|Playwright 测试用户/)).toHaveCount(0);
@@ -565,6 +566,39 @@ test("template rows use native time pickers", async ({ page }) => {
   await page.getByRole("button", { name: "日程模板" }).click();
   await expect(page.locator(".template-row input[type=\"time\"]").first()).toBeVisible();
   await expect(page.locator(".add-row-form input[type=\"time\"]")).toHaveCount(2);
+});
+
+test("overlapping a time row shows the occupied ranges and does not save", async ({ page }) => {
+  await openEditor(page);
+  await page.getByRole("button", { name: "日程模板" }).click();
+
+  const rows = page.locator(".template-rows .template-row");
+  await expect(rows.nth(1)).toBeVisible();
+  const rowCount = await rows.count();
+  const firstStart = await rows.nth(0).locator("input[aria-label='开始时间']").inputValue();
+  const firstEnd = await rows.nth(0).locator("input[aria-label='结束时间']").inputValue();
+  const target = rows.nth(1);
+  const targetStart = target.locator("input[aria-label='开始时间']");
+  const targetEnd = target.locator("input[aria-label='结束时间']");
+  const originalStart = await targetStart.inputValue();
+  const originalEnd = await targetEnd.inputValue();
+
+  const addForm = page.locator(".add-row-form");
+  await expect(addForm.getByTestId("time-occupancy")).toBeVisible();
+  await expect(addForm.getByTestId("time-range-track")).toBeVisible();
+  await addForm.locator("input[aria-label='开始时间']").fill(firstStart);
+  await addForm.locator("input[aria-label='结束时间']").fill(firstEnd);
+  await expect(addForm.locator(".occupancy-hint")).toContainText("重叠");
+  await expect(addForm.getByRole("button", { name: "添加时间行" })).toBeDisabled();
+
+  await targetStart.fill(firstStart);
+  await targetEnd.fill(firstEnd);
+  await expect(target.locator(".occupancy-hint")).toContainText("重叠");
+  await expect(targetStart).toHaveAttribute("aria-invalid", "true");
+  await addForm.getByRole("heading", { name: "添加时间行" }).click();
+  await expect(targetStart).toHaveValue(originalStart);
+  await expect(targetEnd).toHaveValue(originalEnd);
+  await expect(rows).toHaveCount(rowCount);
 });
 
 test("auto-arrange previews conflicts, applies a block, and can be undone", async ({ page }) => {

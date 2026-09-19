@@ -224,13 +224,37 @@ export function swapAdjustmentCourses(
   return next;
 }
 
+/**
+ * Keeps a later permanent edit as the baseline and replays only the cells
+ * this week's adjustment actually changed. Using the saved snapshot wholesale
+ * would roll the rest of the timetable back to the moment the adjustment was made.
+ */
+export function applyAdjustmentOverlay(
+  baseConfig: ScheduleConfig,
+  adjustment: Pick<ScheduleAdjustmentPayload, "config" | "weekIndex" | "changedCells">,
+): ScheduleConfig {
+  const next = cloneConfig(baseConfig);
+  for (const cell of adjustment.changedCells) {
+    const sourceDay = adjustment.config.daily_class[cell.dayIndex];
+    const targetDay = next.daily_class[cell.dayIndex];
+    if (!sourceDay || !targetDay) continue;
+    if (cell.classIndex >= targetDay.classList.length || cell.classIndex >= sourceDay.classList.length) continue;
+    const code = getCourseForWeek(sourceDay.classList[cell.classIndex], adjustment.weekIndex);
+    targetDay.classList[cell.classIndex] = setAdjustmentCourseForWeek(targetDay.classList[cell.classIndex], adjustment.weekIndex, code);
+  }
+  return next;
+}
+
 export function getEffectiveScheduleConfig(
   publishedConfig: ScheduleConfig,
   adjustment: ScheduleAdjustmentPayload | null,
   now = new Date(),
 ): ScheduleConfig {
   if (!adjustment || !isAdjustmentActive(adjustment, now)) return publishedConfig;
-  const validation = validateScheduleConfig(adjustment.config);
+  const overlaid = adjustment.changedCells.length > 0
+    ? applyAdjustmentOverlay(publishedConfig, adjustment)
+    : cloneConfig(adjustment.config);
+  const validation = validateScheduleConfig(overlaid);
   if (!validation.success) return publishedConfig;
   const next = cloneConfig(validation.data);
   next.daily_class = next.daily_class.map((day) => ({

@@ -59,10 +59,23 @@
 
   --radius-sm: 4px;
   --radius-md: 6px;
+  --radius-lg: 10px;
   --radius-pill: 999px;
   --rule-thin: 1px solid var(--color-rule);
   --shadow-panel: 0 16px 36px -30px oklch(24% 0.025 255 / 0.6);
   --shadow-float: 0 18px 36px -18px oklch(24% 0.025 255 / 0.28);
+  --shadow-lift-sm:
+    0 1px 1px oklch(24% 0.025 255 / 0.05),
+    0 10px 22px -14px oklch(24% 0.025 255 / 0.32);
+  --shadow-lift-md:
+    0 2px 4px oklch(24% 0.025 255 / 0.06),
+    0 16px 32px -16px oklch(24% 0.025 255 / 0.34);
+  --shadow-lift-accent:
+    0 1px 2px oklch(46% 0.21 265 / 0.08),
+    0 10px 24px -12px oklch(46% 0.21 265 / 0.32);
+  --color-rail-well: oklch(93.4% 0.018 248);
+  --color-rail-well-deep: oklch(90.8% 0.022 248);
+  --color-gutter: oklch(95.4% 0.008 248);
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);

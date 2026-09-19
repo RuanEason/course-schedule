@@ -15,10 +15,12 @@ import {
   type TemplateRow,
 } from "@/lib/schedule/types";
 import { UserMenu } from "@/components/user-menu";
+import { ViewerAuth } from "@/components/viewer-auth";
 
 interface ScheduleViewerProps {
   config: ScheduleConfig;
-  user: PublicUser;
+  user?: PublicUser;
+  auth?: { corpId: string; clientId: string };
   publishedAt?: string | null;
 }
 
@@ -87,7 +89,7 @@ function MobileViewerRow({ config, row, dayIndex, weekIndex }: {
   );
 }
 
-export function ScheduleViewer({ config, user, publishedAt }: ScheduleViewerProps) {
+export function ScheduleViewer({ config, user, auth, publishedAt }: ScheduleViewerProps) {
   const [selectedDay, setSelectedDay] = useState(1);
   const [weekIndex, setWeekIndex] = useState(0);
   const [weekMenuOpen, setWeekMenuOpen] = useState(false);
@@ -104,7 +106,7 @@ export function ScheduleViewer({ config, user, publishedAt }: ScheduleViewerProp
         </Link>
         <div className="viewer-topbar-right">
           <span className="viewer-published-status"><Send size={14} />{publishedAt ? `更新于 ${new Date(publishedAt).toLocaleString("zh-CN", { hour12: false })}` : "当前版本"}</span>
-          <UserMenu user={user} showEditorLink showAdminLink />
+          {user ? <UserMenu user={user} showEditorLink showAdminLink /> : <ViewerAuth corpId={auth?.corpId} clientId={auth?.clientId} />}
         </div>
       </header>
 

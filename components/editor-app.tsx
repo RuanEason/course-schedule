@@ -22,6 +22,7 @@ import {
   Clock3,
   ChevronDown,
   ClipboardCopy,
+  Copy,
   Download,
   Eye,
   GitCompareArrows,
@@ -44,9 +45,10 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
 import { EditorPresence } from "@/components/editor-presence";
+import { TimeOccupancyBar } from "@/components/time-occupancy-bar";
 import type { PublicUser } from "@/lib/auth";
 import {
   applyAutoArrange,
@@ -59,12 +61,14 @@ import {
   addTemplateRow,
   assignDayTemplate,
   copyWeek,
+  duplicateTemplate,
   getClassRows,
   getTemplateCourseCount,
   getTemplateRows,
   removeTemplate,
   removeTemplateRow,
   renameTemplate,
+  suggestTemplateCopyName,
   setDayCourse,
   setTemplateDivider,
   subjectReferences,
@@ -74,6 +78,7 @@ import {
 } from "@/lib/schedule/editor-operations";
 import { createBlankConfig } from "@/lib/schedule/initial-config";
 import { diffScheduleConfigs, type ScheduleDiffItem } from "@/lib/schedule/diff";
+import { findOverlap, getOccupiedRanges, suggestNextFreeSlot } from "@/lib/schedule/time-occupancy";
 import { normalizeScheduleConfig } from "@/lib/schedule/normalize";
 import {
   composeSubjectCode,
@@ -99,6 +104,7 @@ import {
 import {
   formatScheduleDate,
   getScheduleWeekWindow,
+  applyAdjustmentOverlay,
   setAdjustmentCourse,
   swapAdjustmentCourses,
 } from "@/lib/schedule/adjustment";
@@ -219,14 +225,7 @@ function formatMinutesOfDay(minutes: number): string {
 }
 
 function overlapsTimeRange(rows: TemplateRow[], candidate: string, except?: string) {
-  const candidateRange = parseTimeRange(candidate);
-  if (!candidateRange) return false;
-  return rows.some((row) => {
-    if (row.timeRange === except) return false;
-    const range = parseTimeRange(row.timeRange);
-    if (!range) return false;
-    return candidateRange.start <= range.end && range.start <= candidateRange.end;
-  });
+  return findOverlap(getOccupiedRanges(rows, except), candidate) !== null;
 }
 
 function errorMessage(error: unknown) {
@@ -690,20 +689,76 @@ function TimeRangeFields({
   onChange,
   onCommit,
   onInvalid,
+  occupiedRows,
+  exceptTimeRange,
+  showOccupancy = false,
+  alwaysShowOccupancy = false,
 }: {
   value: string;
   onChange?: (value: string) => void;
   onCommit?: (value: string) => void;
-  onInvalid?: () => void;
+  onInvalid?: (message: string) => void;
+  occupiedRows?: TemplateRow[];
+  exceptTimeRange?: string;
+  showOccupancy?: boolean;
+  alwaysShowOccupancy?: boolean;
 }) {
   const initial = splitTimeRange(value);
   const [start, setStart] = useState(initial.start);
   const [end, setEnd] = useState(initial.end);
+  const [panelHeld, setPanelHeld] = useState(alwaysShowOccupancy);
+  const hintId = useId();
+  const holdTimerRef = useRef<number | null>(null);
+  const draftValue = `${start}-${end}`;
+  const draftParsed = parseTimeRange(draftValue);
+  const occupied = showOccupancy && occupiedRows ? getOccupiedRanges(occupiedRows, exceptTimeRange) : [];
+  const draftInvalid = !draftParsed || draftParsed.start >= draftParsed.end;
+  const overlap = draftParsed && !draftInvalid ? findOverlap(occupied, draftParsed) : null;
+  const ariaInvalid = draftInvalid || overlap !== null;
+
+  useEffect(() => {
+    const next = splitTimeRange(value);
+    setStart(next.start);
+    setEnd(next.end);
+  }, [value]);
+
+  useEffect(() => () => {
+    if (holdTimerRef.current !== null) window.clearTimeout(holdTimerRef.current);
+  }, []);
+
+  function clearHoldTimer() {
+    if (holdTimerRef.current === null) return;
+    window.clearTimeout(holdTimerRef.current);
+    holdTimerRef.current = null;
+  }
+
+  function holdPanel() {
+    if (alwaysShowOccupancy) return;
+    clearHoldTimer();
+    setPanelHeld(true);
+  }
+
+  function releasePanelSoon() {
+    if (alwaysShowOccupancy) return;
+    clearHoldTimer();
+    holdTimerRef.current = window.setTimeout(() => {
+      setPanelHeld(false);
+      holdTimerRef.current = null;
+    }, 1800);
+  }
 
   function updateRange(nextStart: string, nextEnd: string) {
+    holdPanel();
     setStart(nextStart);
     setEnd(nextEnd);
     onChange?.(`${nextStart}-${nextEnd}`);
+  }
+
+  function revertRange() {
+    const previous = splitTimeRange(value);
+    setStart(previous.start);
+    setEnd(previous.end);
+    onChange?.(value);
   }
 
   function commitRange() {
@@ -711,59 +766,96 @@ function TimeRangeFields({
     if (next === value) return;
     const parsed = parseTimeRange(next);
     if (!parsed || parsed.start >= parsed.end) {
-      const previous = splitTimeRange(value);
-      setStart(previous.start);
-      setEnd(previous.end);
-      onInvalid?.();
+      revertRange();
+      onInvalid?.("请选择有效的开始和结束时间，结束时间需要晚于开始时间");
+      return;
+    }
+    const conflict = occupiedRows ? findOverlap(getOccupiedRanges(occupiedRows, exceptTimeRange), parsed) : null;
+    if (conflict) {
+      revertRange();
+      onInvalid?.(`与「${conflict.label}」重叠（${conflict.timeRange.replace("-", " – ")}），已恢复原时间`);
       return;
     }
     onCommit?.(next);
   }
 
+  function previewRange(next: string) {
+    holdPanel();
+    const parts = splitTimeRange(next);
+    setStart(parts.start);
+    setEnd(parts.end);
+    onChange?.(next);
+  }
+
+  function selectRange(next: string) {
+    // Keep the panel open and only update the draft; commit happens on blur/Enter.
+    // Committing on every drag-end remounts the row (key=timeRange) and snaps the bar away.
+    previewRange(next);
+  }
+
   return (
     <div
-      className="time-range-fields"
+      className={`time-range-editor${alwaysShowOccupancy || panelHeld ? " is-expanded" : ""}`}
+      onFocusCapture={holdPanel}
+      onPointerDownCapture={holdPanel}
       onBlur={(event) => {
         const relatedTarget = event.relatedTarget;
         if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return;
         commitRange();
+        releasePanelSoon();
       }}
     >
-      <label>
-        <span>开始</span>
-        <input
-          type="time"
-          value={start}
-          min="00:00"
-          max="23:59"
-          step="60"
-          aria-label="开始时间"
-          onChange={(event) => updateRange(event.target.value, end)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            commitRange();
-          }}
+      <div className="time-range-fields">
+        <label>
+          <span>开始</span>
+          <input
+            type="time"
+            value={start}
+            min="00:00"
+            max="23:59"
+            step="60"
+            aria-label="开始时间"
+            aria-invalid={ariaInvalid}
+            aria-describedby={showOccupancy ? hintId : undefined}
+            onChange={(event) => updateRange(event.target.value, end)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              commitRange();
+            }}
+          />
+        </label>
+        <span className="time-range-separator" aria-hidden="true">—</span>
+        <label>
+          <span>结束</span>
+          <input
+            type="time"
+            value={end}
+            min="00:00"
+            max="23:59"
+            step="60"
+            aria-label="结束时间"
+            aria-invalid={ariaInvalid}
+            aria-describedby={showOccupancy ? hintId : undefined}
+            onChange={(event) => updateRange(start, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              commitRange();
+            }}
+          />
+        </label>
+      </div>
+      {showOccupancy && occupiedRows ? (
+        <TimeOccupancyBar
+          rows={occupiedRows}
+          draftTimeRange={draftValue}
+          exceptTimeRange={exceptTimeRange}
+          hintId={hintId}
+          onPreviewRange={previewRange}
+          onSelectRange={selectRange}
         />
-      </label>
-      <span className="time-range-separator" aria-hidden="true">—</span>
-      <label>
-        <span>结束</span>
-        <input
-          type="time"
-          value={end}
-          min="00:00"
-          max="23:59"
-          step="60"
-          aria-label="结束时间"
-          onChange={(event) => updateRange(start, event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key !== "Enter") return;
-            event.preventDefault();
-            commitRange();
-          }}
-        />
-      </label>
+      ) : null}
     </div>
   );
 }
@@ -895,6 +987,15 @@ function ResizeHandle({
   );
 }
 
+function hashSubjectHue(code: string) {
+  let hash = 0;
+  for (let index = 0; index < code.length; index += 1) {
+    hash = (hash * 31 + code.charCodeAt(index)) >>> 0;
+  }
+  // Cool workbench range: teal → blue → indigo → violet
+  return 185 + (hash % 95);
+}
+
 function SubjectTile({ code, name, compact = false }: { code: string; name: string; compact?: boolean }) {
   const parts = parseSubjectCode(code);
   return (
@@ -956,6 +1057,7 @@ function CourseCell({
   adjustmentNote,
   adjustmentTargetName,
   selected,
+  dayActive = false,
   onSelect,
 }: {
   id: string;
@@ -965,6 +1067,7 @@ function CourseCell({
   adjustmentNote?: string;
   adjustmentTargetName?: string;
   selected: boolean;
+  dayActive?: boolean;
   onSelect: () => void;
 }) {
   const draggable = useDraggable({ id });
@@ -978,12 +1081,20 @@ function CourseCell({
   );
   const transform = CSS.Translate.toString(draggable.transform);
   const adjusted = Boolean(adjustmentNote);
+  const empty = code === PLACEHOLDER_SUBJECT_CODE;
+  const hue = empty ? null : hashSubjectHue(code);
+  const cellTint = hue === null
+    ? undefined
+    : {
+        ["--cell-tint" as string]: `oklch(55% 0.12 ${hue})`,
+        ["--cell-tint-soft" as string]: `oklch(96% 0.028 ${hue})`,
+      };
   return (
     <button
       ref={setRefs}
       type="button"
-      className={`course-cell${selected ? " is-selected" : ""}${adjusted ? " is-adjusted" : ""}${draggable.isDragging ? " is-dragging" : ""}${droppable.isOver ? " is-over" : ""}`}
-      style={{ transform }}
+      className={`course-cell${empty ? " is-empty" : ""}${dayActive ? " is-day-active" : ""}${selected ? " is-selected" : ""}${adjusted ? " is-adjusted" : ""}${draggable.isDragging ? " is-dragging" : ""}${droppable.isOver ? " is-over" : ""}`}
+      style={{ transform, ...cellTint }}
       onClick={onSelect}
       title={adjustmentNote}
       {...draggable.attributes}
@@ -1019,17 +1130,38 @@ function TemplatePanel({
 }) {
   const templateNames = Object.keys(config.timetable);
   const rows = getTemplateRows(config, activeTemplate);
+  const usageCount = config.daily_class.filter((day) => day.timetable === activeTemplate).length;
+  const usingDayLabels = config.daily_class.filter((day) => day.timetable === activeTemplate).map((day) => `周${day.Chinese}`);
   const [newTemplateName, setNewTemplateName] = useState("");
   const [renameValue, setRenameValue] = useState(activeTemplate);
-  const [newTimeRange, setNewTimeRange] = useState("11:00-11:39");
+  const [deletePromptOpen, setDeletePromptOpen] = useState(false);
+  const [replacementTemplate, setReplacementTemplate] = useState("");
+  const [newTimeRange, setNewTimeRange] = useState(() => suggestNextFreeSlot(rows));
   const [newRowKind, setNewRowKind] = useState<"class" | "event">("class");
   const [newEventLabel, setNewEventLabel] = useState("课间");
   const [autoArrangeOpen, setAutoArrangeOpen] = useState(false);
   const [autoArrangeForm, setAutoArrangeForm] = useState<AutoArrangeFormState>(() => autoArrangeFormState(inferAutoArrangeOptions(config, activeTemplate)));
+  const seenTemplate = useRef(activeTemplate);
+  const newRowOverlaps = overlapsTimeRange(rows, newTimeRange);
+  const newRowParsed = parseTimeRange(newTimeRange);
+  const newRowInvalid = !newRowParsed || newRowParsed.start >= newRowParsed.end || newRowOverlaps;
+
+  useEffect(() => {
+    const nextRows = getTemplateRows(config, activeTemplate);
+    const templateChanged = seenTemplate.current !== activeTemplate;
+    seenTemplate.current = activeTemplate;
+    setNewTimeRange((current) => {
+      if (templateChanged) return suggestNextFreeSlot(nextRows);
+      const parsed = parseTimeRange(current);
+      if (parsed && parsed.start < parsed.end && !overlapsTimeRange(nextRows, current)) return current;
+      return suggestNextFreeSlot(nextRows);
+    });
+  }, [activeTemplate, config]);
 
   function selectTemplate(name: string) {
     setActiveTemplate(name);
     setRenameValue(name);
+    setDeletePromptOpen(false);
   }
 
   function handleAddTemplate(event: React.FormEvent<HTMLFormElement>) {
@@ -1049,6 +1181,32 @@ function TemplatePanel({
     if (templateNames.includes(name)) return announce("日程模板名称不能重复");
     commit((current) => renameTemplate(current, activeTemplate, name), `已将模板重命名为 ${name}`);
     setActiveTemplate(name);
+    setDeletePromptOpen(false);
+  }
+
+  function handleDuplicate() {
+    const name = suggestTemplateCopyName(templateNames, activeTemplate);
+    commit((current) => duplicateTemplate(current, activeTemplate, name), `已复制模板 ${name}`);
+    selectTemplate(name);
+    announce(`已复制为「${name}」，可在副本上微调，原模板保持不变`);
+  }
+
+  function openDeletePrompt() {
+    if (templateNames.length < 2) return announce("至少保留一个日程模板");
+    setReplacementTemplate(templateNames.find((name) => name !== activeTemplate) ?? "");
+    setDeletePromptOpen(true);
+  }
+
+  function handleConfirmDelete() {
+    const deletedName = activeTemplate;
+    const replacement = usageCount > 0 ? replacementTemplate : undefined;
+    if (usageCount > 0 && !templateNames.includes(replacementTemplate)) return announce("请选择删除后这些天要改用的模板");
+    const nextTemplate = usageCount > 0 ? replacementTemplate : templateNames.find((name) => name !== deletedName) ?? deletedName;
+    commit((current) => removeTemplate(current, deletedName, replacement), `已删除模板 ${deletedName}`);
+    setActiveTemplate(nextTemplate);
+    setRenameValue(nextTemplate);
+    setDeletePromptOpen(false);
+    announce(usageCount > 0 ? `已删除「${deletedName}」，使用中的日期已改用「${replacementTemplate}」` : `已删除模板「${deletedName}」`);
   }
 
   function handleAddRow(event: React.FormEvent<HTMLFormElement>) {
@@ -1069,7 +1227,6 @@ function TemplatePanel({
         ),
       newRowKind === "class" ? "已新增课程时间段" : "已新增事件时间段",
     );
-    setNewTimeRange("11:00-11:39");
   }
 
   const autoArrangeOptions = useMemo(() => autoArrangeOptionsFromForm(autoArrangeForm), [autoArrangeForm]);
@@ -1096,8 +1253,6 @@ function TemplatePanel({
       `已自动编排 ${activeTemplate} 的 ${autoArrangeOptions.classCount} 节课程`,
     );
   }
-
-  const usageCount = config.daily_class.filter((day) => day.timetable === activeTemplate).length;
 
   return (
     <section className="panel-section panel-templates">
@@ -1143,6 +1298,55 @@ function TemplatePanel({
         </div>
       </form>
 
+      <div className="template-actions">
+        <button className="secondary-button" type="button" onClick={handleDuplicate}>
+          <Copy size={14} />
+          复制模板
+        </button>
+        <button
+          className="secondary-button template-delete-button"
+          type="button"
+          onClick={openDeletePrompt}
+          disabled={templateNames.length < 2}
+          title={templateNames.length < 2 ? "至少保留一个日程模板" : "删除当前模板"}
+        >
+          <Trash2 size={14} />
+          删除模板
+        </button>
+      </div>
+
+      {deletePromptOpen ? (
+        <div className="template-delete-prompt" role="group" aria-label="确认删除模板">
+          {usageCount > 0 ? (
+            <>
+              <p>
+                「{activeTemplate}」正被 {usingDayLabels.join("、")} 使用。删除前请选择这些天改用哪个模板；课程槽数量不同时会按新模板增减。
+              </p>
+              <label htmlFor="replacement-template">
+                改用模板
+                <select
+                  id="replacement-template"
+                  value={replacementTemplate}
+                  onChange={(event) => setReplacementTemplate(event.target.value)}
+                >
+                  {templateNames.filter((name) => name !== activeTemplate).map((name) => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+              </label>
+            </>
+          ) : (
+            <p>「{activeTemplate}」当前没有被任何一天使用，删除后可用撤销恢复。</p>
+          )}
+          <div className="template-delete-actions">
+            <button className="secondary-button" type="button" onClick={() => setDeletePromptOpen(false)}>取消</button>
+            <button className="danger-link" type="button" onClick={handleConfirmDelete}>
+              <Trash2 size={14} />确认删除
+            </button>
+          </div>
+        </div>
+      ) : null}
+
       <div className="panel-divider" />
 
       <div className="subsection-heading">
@@ -1170,7 +1374,10 @@ function TemplatePanel({
             </div>
             <TimeRangeFields
               value={row.timeRange}
-              onInvalid={() => announce("请选择有效的开始和结束时间，结束时间需要晚于开始时间")}
+              occupiedRows={rows}
+              exceptTimeRange={row.timeRange}
+              showOccupancy
+              onInvalid={(message) => announce(message)}
               onCommit={(value) => {
                 if (rows.some((other) => other.timeRange === value && other.timeRange !== row.timeRange)) return announce("该时间段已经存在");
                 if (overlapsTimeRange(rows, value, row.timeRange)) return announce("该时间段与现有时间行重叠");
@@ -1198,7 +1405,15 @@ function TemplatePanel({
         ))}
       </div>
 
-      <div className="auto-arrange-tool">
+      <div className={`auto-arrange-tool${autoArrangeOpen ? " is-open" : ""}`}>
+        <div className="auto-arrange-aura" aria-hidden="true">
+          <span className="auto-arrange-particle" />
+          <span className="auto-arrange-particle" />
+          <span className="auto-arrange-particle" />
+          <span className="auto-arrange-particle" />
+          <span className="auto-arrange-particle" />
+          <span className="auto-arrange-particle" />
+        </div>
         <button
           className="secondary-button full-width auto-arrange-toggle"
           type="button"
@@ -1206,7 +1421,7 @@ function TemplatePanel({
           aria-controls="auto-arrange-form"
           onClick={() => setAutoArrangeOpen((current) => !current)}
         >
-          <Sparkles size={15} />
+          <Sparkles className="auto-arrange-spark" size={15} />
           <span>自动编排</span>
           <ChevronDown className={autoArrangeOpen ? "is-rotated" : ""} size={15} />
         </button>
@@ -1218,7 +1433,7 @@ function TemplatePanel({
                 <span className="section-kicker">CONTINUOUS BLOCK</span>
                 <h3>生成连续区段</h3>
               </div>
-              <Sparkles size={15} aria-hidden="true" />
+              <Sparkles className="auto-arrange-spark" size={15} aria-hidden="true" />
             </div>
             <div className="form-grid-two">
               <label htmlFor="auto-arrange-start">
@@ -1328,11 +1543,17 @@ function TemplatePanel({
           <h3>添加时间行</h3>
           <Plus size={15} />
         </div>
-        <div className="form-grid-two">
-          <div className="new-time-field">
-            <span className="field-label">时间段</span>
-            <TimeRangeFields value={newTimeRange} onChange={setNewTimeRange} />
-          </div>
+        <div className="new-time-field">
+          <span className="field-label">时间段</span>
+          <TimeRangeFields
+            value={newTimeRange}
+            onChange={setNewTimeRange}
+            occupiedRows={rows}
+            showOccupancy
+            alwaysShowOccupancy
+          />
+        </div>
+        <div className={newRowKind === "event" ? "form-grid-two" : undefined}>
           <label>
             类型
             <select value={newRowKind} onChange={(event) => setNewRowKind(event.target.value as "class" | "event")}>
@@ -1340,28 +1561,22 @@ function TemplatePanel({
               <option value="event">事件</option>
             </select>
           </label>
+          {newRowKind === "event" ? (
+            <label>
+              事件名称
+              <input value={newEventLabel} onChange={(event) => setNewEventLabel(event.target.value)} />
+            </label>
+          ) : null}
         </div>
-        {newRowKind === "event" ? (
-          <label>
-            事件名称
-            <input value={newEventLabel} onChange={(event) => setNewEventLabel(event.target.value)} />
-          </label>
-        ) : null}
-        <button className="secondary-button full-width" type="submit"><Plus size={15} />添加时间行</button>
-      </form>
-
-      {usageCount === 0 ? (
         <button
-          className="danger-link"
-          type="button"
-          onClick={() => {
-            commit((current) => removeTemplate(current, activeTemplate), `已删除模板 ${activeTemplate}`);
-            setActiveTemplate(templateNames.find((name) => name !== activeTemplate) ?? "workday");
-          }}
+          className="secondary-button full-width"
+          type="submit"
+          disabled={newRowInvalid}
+          title={newRowOverlaps ? "该时间段与现有时间行重叠" : newRowInvalid ? "结束时间需要晚于开始时间" : "添加时间行"}
         >
-          <Trash2 size={14} />删除未使用模板
+          <Plus size={15} />添加时间行
         </button>
-      ) : null}
+      </form>
     </section>
   );
 }
@@ -2076,9 +2291,11 @@ function MatrixRow({
       </div>
       {config.daily_class.map((day, dayIndex) => {
         if (day.timetable !== activeTemplate) {
-          return <div className="disabled-cell" key={dayIndex}><span>{day.timetable}</span></div>;
+          return <div className={`disabled-cell${selectedDay === dayIndex ? " is-day-active" : ""}`} key={dayIndex}><span>{day.timetable}</span></div>;
         }
-        if (row.kind === "event") return <div className="event-cell" key={dayIndex}><span>{row.eventLabel}</span></div>;
+        if (row.kind === "event") {
+          return <div className={`event-cell${selectedDay === dayIndex ? " is-day-active" : ""}`} key={dayIndex}><span>{row.eventLabel}</span></div>;
+        }
         const classIndex = row.classIndex ?? 0;
         const value = day.classList[classIndex];
         const code = getCourseForWeek(value, weekIndex);
@@ -2092,6 +2309,7 @@ function MatrixRow({
             adjustmentNote={adjustmentCells.get(`${dayIndex}:${classIndex}`)?.note}
             adjustmentTargetName={adjustmentCells.get(`${dayIndex}:${classIndex}`)?.targetName}
             selected={selectedCell?.dayIndex === dayIndex && selectedCell.classIndex === classIndex}
+            dayActive={selectedDay === dayIndex}
             onSelect={() => onSelect(dayIndex, classIndex)}
           />
         );
@@ -2133,7 +2351,7 @@ function ScheduleMatrix({
     <section className="panel-section panel-schedule">
       <div className="section-heading schedule-heading">
         <div>
-          <p className="section-kicker">WEEKLY BOARD</p>
+          <p className="section-kicker">本周矩阵</p>
           <h2>星期矩阵</h2>
         </div>
         <div className="schedule-heading-meta">
@@ -2483,11 +2701,11 @@ export function EditorApp({ user }: { user: PublicUser }) {
     try {
       const sourceDraftVersion = await flushDraft();
       const savedAdjustment = temporaryAdjustment;
-      const baseConfig = savedAdjustment ? cloneConfig(savedAdjustment.config) : cloneConfig(config);
+      const baseConfig = savedAdjustment ? applyAdjustmentOverlay(config, savedAdjustment) : cloneConfig(config);
       const baseWeekIndex = savedAdjustment?.weekIndex ?? weekIndex;
       setAdjustmentConfig(baseConfig);
       setAdjustmentWeekIndex(baseWeekIndex);
-      setAdjustmentSourceDraftVersion(savedAdjustment?.sourceDraftVersion ?? sourceDraftVersion);
+      setAdjustmentSourceDraftVersion(sourceDraftVersion);
       setAdjustmentDirty(false);
       adjustmentUndoConfigRef.current = null;
       setSelectedCell(null);
