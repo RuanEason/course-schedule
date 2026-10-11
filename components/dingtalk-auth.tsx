@@ -7,17 +7,19 @@ interface DingTalkAuthProps {
   clientId: string;
   corpId: string;
   returnTo?: string;
+  /** Prefix for the auth endpoint and the post-login redirect: `""` or `/class2`. */
+  basePath?: string;
 }
 
 function safeReturnTo(value: string | undefined): string {
   return value && value.startsWith("/") && !value.startsWith("//") ? value : "/";
 }
 
-export function DingTalkAuth({ clientId, corpId, returnTo = "/" }: DingTalkAuthProps) {
+export function DingTalkAuth({ clientId, corpId, returnTo = "/", basePath = "" }: DingTalkAuthProps) {
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [message, setMessage] = useState("");
   const attemptedRef = useRef(false);
-  const target = safeReturnTo(returnTo);
+  const target = `${basePath}${safeReturnTo(returnTo)}`;
 
   const beginLogin = useCallback(async () => {
     if (!clientId || !corpId) {
@@ -31,7 +33,7 @@ export function DingTalkAuth({ clientId, corpId, returnTo = "/" }: DingTalkAuthP
     try {
       const { default: dd } = await import("dingtalk-jsapi");
       const result = await dd.requestAuthCode({ corpId, clientId });
-      const response = await fetch("/api/auth/dingtalk", {
+      const response = await fetch(`${basePath}/api/auth/dingtalk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
@@ -46,7 +48,7 @@ export function DingTalkAuth({ clientId, corpId, returnTo = "/" }: DingTalkAuthP
         ? error.message
         : "请在钉钉工作台内打开此应用后重试");
     }
-  }, [clientId, corpId, target]);
+  }, [basePath, clientId, corpId, target]);
 
   useEffect(() => {
     if (attemptedRef.current) return;

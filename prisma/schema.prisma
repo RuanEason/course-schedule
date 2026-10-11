@@ -7,6 +7,38 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/// One class (班级). `id` doubles as the URL slug (`/class2`) and as the
+/// partition key for every per-class row below, so adding a class needs no code
+/// change and no extra mapping table. `"default"` is kept as the historical
+/// first class so the pre-existing document, the published `/config.json` and
+/// the Electron client keep working on upgrade.
+model Class {
+  id           String   @id
+  name         String
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  members      ClassMember[]
+
+  @@index([isActive, displayOrder])
+  @@map("class_schedule_classes")
+}
+
+/// Which classes a teacher is allowed to edit. Super admins bypass this list.
+model ClassMember {
+  id        String       @id @default(cuid())
+  classId   String
+  userId    String
+  createdAt DateTime     @default(now())
+  class     Class        @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user      DingTalkUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, userId])
+  @@index([userId])
+  @@map("class_schedule_class_members")
+}
+
 model ScheduleDocument {
   id                      String    @id @default("default")
   draftConfig             Json
@@ -63,6 +95,7 @@ model DingTalkUser {
   sessions      AuthSession[]
   policies      EditorAccessPolicy[] @relation("PolicyUpdatedBy")
   presences     EditorPresence[]
+  classMembers  ClassMember[]
 
   @@unique([corpId, userId])
   @@unique([corpId, unionId])
@@ -70,15 +103,19 @@ model DingTalkUser {
   @@map("class_schedule_dingtalk_users")
 }
 
+/// Presence is per class: two teachers editing different classes must not see
+/// each other in the collaborator cluster.
 model EditorPresence {
   id          String       @id @default(cuid())
+  classId     String       @default("default")
   userId      String
   presenceId  String
   lastSeenAt  DateTime
   createdAt   DateTime     @default(now())
   user        DingTalkUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  @@unique([userId, presenceId])
+  @@unique([classId, userId, presenceId])
+  @@index([classId, lastSeenAt])
   @@index([lastSeenAt])
   @@map("class_schedule_editor_presences")
 }

@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { Eye, Pencil, Settings2, Users } from "lucide-react";
+import { Eye, LayoutGrid, Pencil, Settings2, Users } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { ClassSwitcher } from "@/components/class-switcher";
 import type { PublicUser } from "@/lib/auth";
 
 interface PresenceUser {
@@ -44,7 +45,7 @@ function Avatar({ user, className = "" }: { user: PresenceUser; className?: stri
   );
 }
 
-export function EditorPresence({ user }: { user: PublicUser }) {
+export function EditorPresence({ user, basePath = "", classId }: { user: PublicUser; basePath?: string; classId?: string }) {
   const [onlineUsers, setOnlineUsers] = useState<PresenceUser[]>(() => [toPresenceUser(user)]);
   const [isOpen, setIsOpen] = useState(false);
   const presenceIdRef = useRef<string | null>(null);
@@ -80,7 +81,7 @@ export function EditorPresence({ user }: { user: PublicUser }) {
     presenceIdRef.current = presenceId;
 
     async function heartbeat() {
-      await fetch("/api/editor/presence", {
+      await fetch(`${basePath}/api/editor/presence`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
@@ -89,7 +90,7 @@ export function EditorPresence({ user }: { user: PublicUser }) {
     }
 
     async function refresh() {
-      const response = await fetch("/api/editor/presence", { cache: "no-store", credentials: "same-origin" }).catch(() => null);
+      const response = await fetch(`${basePath}/api/editor/presence`, { cache: "no-store", credentials: "same-origin" }).catch(() => null);
       if (!response?.ok) return;
       const data = await response.json().catch(() => null) as { users?: PresenceUser[] } | null;
       if (mounted && data?.users) setOnlineUsers(mergeUsers(user, data.users));
@@ -104,7 +105,7 @@ export function EditorPresence({ user }: { user: PublicUser }) {
       clearInterval(heartbeatTimer);
       clearInterval(refreshTimer);
       clearTimers();
-      void fetch("/api/editor/presence", {
+      void fetch(`${basePath}/api/editor/presence`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
@@ -112,7 +113,7 @@ export function EditorPresence({ user }: { user: PublicUser }) {
         body: JSON.stringify({ presenceId }),
       }).catch(() => undefined);
     };
-  }, [user]);
+  }, [basePath, user]);
 
   const visibleUsers = onlineUsers.slice(0, 4);
   const extraCount = Math.max(0, onlineUsers.length - visibleUsers.length);
@@ -127,6 +128,12 @@ export function EditorPresence({ user }: { user: PublicUser }) {
         if (!event.currentTarget.contains(event.relatedTarget)) setIsOpen(false);
       }}
     >
+      {/*
+        The editor has no `UserMenu`, so the class switcher lives here. Without
+        it a teacher who edits two classes would have to go back to the viewer to
+        reach the other one.
+      */}
+      <ClassSwitcher user={user} basePath={basePath} classId={classId} />
       <button className="presence-trigger" type="button" aria-label={`${onlineUsers.length} 人正在编辑`} aria-expanded={isOpen} aria-controls="editor-presence-card" onClick={() => openCard(true)}>
         <span className="presence-avatar-stack" aria-hidden="true">
           {visibleUsers.map((onlineUser) => <Avatar key={onlineUser.userId} user={onlineUser} className="presence-avatar-stack-item" />)}
@@ -148,12 +155,13 @@ export function EditorPresence({ user }: { user: PublicUser }) {
         </div>
         {user.isSuperAdmin ? (
           <div className="presence-card-footer">
-            <Link className="user-menu-link" href="/"><Eye size={15} />返回预览视角</Link>
-            <Link className="user-menu-link" href="/admin/access"><Settings2 size={15} />权限设置</Link>
+            <Link className="user-menu-link" href={basePath || "/"}><Eye size={15} />返回预览视角</Link>
+            <Link className="user-menu-link" href={`${basePath}/admin/classes`}><LayoutGrid size={15} />班级管理</Link>
+            <Link className="user-menu-link" href={`${basePath}/admin/access`}><Settings2 size={15} />权限设置</Link>
           </div>
         ) : (
           <div className="presence-card-footer">
-            <Link className="user-menu-link" href="/"><Eye size={15} />返回预览视角</Link>
+            <Link className="user-menu-link" href={basePath || "/"}><Eye size={15} />返回预览视角</Link>
           </div>
         )}
         {user.canEdit ? <span className="presence-card-hint"><Pencil size={12} />编辑状态每 15 秒更新</span> : null}

@@ -13,8 +13,9 @@ import {
   isSuperAdmin,
   normalizeEditorTitles,
 } from "@/lib/auth/permissions";
-import type { DingTalkProfile } from "@/lib/dingtalk";
 import { prisma } from "@/lib/prisma";
+import { DEFAULT_CLASS_ID, isValidClassSlug } from "@/lib/schedule/classes";
+import type { DingTalkProfile } from "@/lib/dingtalk";
 
 export const SESSION_COOKIE_NAME = "class_schedule_session";
 export const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
@@ -26,6 +27,8 @@ export interface PublicUser {
   avatarUrl: string | null;
   isSuperAdmin: boolean;
   canEdit: boolean;
+  /** Class ids the user may edit; `["*"]` for super admins. Drives the class switcher. */
+  editableClassIds: string[];
 }
 
 export interface CurrentUser extends PublicUser {
@@ -35,6 +38,8 @@ export interface CurrentUser extends PublicUser {
   isAdmin: boolean;
   isBoss: boolean;
   isSenior: boolean;
+  /** Class ids this user may edit. `["*"]` means every class (super admin). */
+  editableClassIds: string[];
 }
 
 type StoredUser = {
@@ -87,7 +92,11 @@ export async function getEditorTitles(): Promise<string[]> {
   return editorTitlesFromPolicy(policy?.editorTitles);
 }
 
-function toCurrentUser(user: StoredUser, editorTitles: readonly string[]): CurrentUser {
+function toCurrentUser(
+  user: StoredUser,
+  editorTitles: readonly string[],
+  editableClassIds: string[] = [],
+): CurrentUser {
   const superAdmin = isSuperAdmin(user);
   const canEdit = isEditorEnabled() && canEditSchedule(user, editorTitles);
   return {
@@ -103,7 +112,39 @@ function toCurrentUser(user: StoredUser, editorTitles: readonly string[]): Curre
     isSenior: user.isSenior,
     isSuperAdmin: superAdmin,
     canEdit,
+    editableClassIds: superAdmin ? ["*"] : editableClassIds,
   };
+}
+
+/**
+ * Class memberships for a stored user.
+ *
+ * Queried on every resolution rather than cached in the session, so revoking a
+ * class membership takes effect on the next request instead of at the next
+ * login.
+ */
+async function editableClassIdsFor(user: StoredUser): Promise<string[]> {
+  if (isSuperAdmin(user)) return ["*"];
+  const memberships = await prisma.classMember.findMany({
+    where: { userId: user.id },
+    select: { classId: true },
+  });
+  const ids = memberships.map((membership) => membership.classId);
+  // Local development (DINGTALK_DEV_AUTH) creates its user on the fly, so it is
+  // never a member of anything and would be locked out of every class. Give it
+  // the configured dev classes instead: `DINGTALK_DEV_USER_CLASSES="default,class2"`.
+  if (ids.length === 0 && isMockUserStored(user)) {
+    const configured = process.env.DINGTALK_DEV_USER_CLASSES?.trim();
+    const ids = configured
+      ? configured.split(",").map((value) => value.trim()).filter(Boolean)
+      : [DEFAULT_CLASS_ID];
+    return ids;
+  }
+  return ids;
+}
+
+function isMockUserStored(user: StoredUser): boolean {
+  return user.id.startsWith("mock:");
 }
 
 function mockProfile(): DingTalkProfile | null {
@@ -140,7 +181,10 @@ function profileToStoredUser(profile: DingTalkProfile): StoredUser {
 
 export async function getCurrentUser(): Promise<CurrentUser | null> {
   const mock = mockProfile();
-  if (mock) return toCurrentUser(profileToStoredUser(mock), await getEditorTitles());
+  if (mock) {
+    const stored = profileToStoredUser(mock);
+    return toCurrentUser(stored, await getEditorTitles(), await editableClassIdsFor(stored));
+  }
 
   const cookieStore = await cookies();
   const token = cookieStore.get(SESSION_COOKIE_NAME)?.value;
@@ -151,7 +195,7 @@ export async function getCurrentUser(): Promise<CurrentUser | null> {
     include: { user: true },
   });
   if (!session || session.expiresAt.getTime() <= Date.now()) return null;
-  return toCurrentUser(session.user, await getEditorTitles());
+  return toCurrentUser(session.user, await getEditorTitles(), await editableClassIdsFor(session.user));
 }
 
 export async function requireAuthenticatedUser(): Promise<CurrentUser> {
@@ -164,6 +208,32 @@ export async function requireEditor(): Promise<CurrentUser> {
   const user = await requireAuthenticatedUser();
   if (!isEditorEnabled()) throw new AuthError(403, "课表编辑功能当前已关闭");
   if (!user.canEdit) throw new AuthError(403, "当前职位没有课表编辑权限");
+  return user;
+}
+
+/** True when the class slug is usable as a document id and as a URL segment. */
+export function isAddressableClassId(classId: string): boolean {
+  return classId === DEFAULT_CLASS_ID || isValidClassSlug(classId);
+}
+
+export function canEditClass(user: CurrentUser, classId: string): boolean {
+  if (!isAddressableClassId(classId)) return false;
+  if (!user.canEdit) return false;
+  return user.editableClassIds.includes("*") || user.editableClassIds.includes(classId);
+}
+
+/**
+ * Editor check scoped to one class.
+ *
+ * Being an editor is a company-wide property (job title), while access to a
+ * class is a membership. Both must hold: a homeroom teacher of class 1 must not
+ * be able to publish class 2's timetable by editing the URL.
+ */
+export async function requireClassEditor(classId: string): Promise<CurrentUser> {
+  const user = await requireEditor();
+  if (!canEditClass(user, classId)) {
+    throw new AuthError(403, "当前账号没有该班级的课表编辑权限");
+  }
   return user;
 }
 
@@ -250,7 +320,7 @@ export async function createDingTalkSession(profile: DingTalkProfile): Promise<C
     value: token,
     ...sessionCookieOptions(),
   });
-  return toCurrentUser(user, await getEditorTitles());
+  return toCurrentUser(user, await getEditorTitles(), await editableClassIdsFor(user));
 }
 
 export function toPublicUser(user: CurrentUser): PublicUser {
@@ -261,6 +331,7 @@ export function toPublicUser(user: CurrentUser): PublicUser {
     avatarUrl: user.avatarUrl,
     isSuperAdmin: user.isSuperAdmin,
     canEdit: user.canEdit,
+    editableClassIds: user.editableClassIds,
   };
 }
 

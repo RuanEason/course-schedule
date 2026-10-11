@@ -6,6 +6,7 @@ import {
   type ScheduleAdjustmentPayload,
   type ScheduleConfig,
 } from "./types";
+import { applyDayOverrides, validateDayOverrides } from "./date-override";
 import { validateScheduleConfig, type ValidationIssue } from "./validation";
 
 export const SCHEDULE_TIME_ZONE = "Asia/Shanghai";
@@ -33,6 +34,12 @@ function parseIsoDate(value: string): Date | null {
   const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
   if (date.getUTCFullYear() !== Number(match[1]) || date.getUTCMonth() !== Number(match[2]) - 1 || date.getUTCDate() !== Number(match[3])) return null;
   return date;
+}
+
+/** Today's date in Asia/Shanghai as `YYYY-MM-DD`. */
+export function getScheduleToday(now = new Date()): string {
+  const parts = datePartsInScheduleZone(now);
+  return isoDateFromUtc(new Date(Date.UTC(parts.year, parts.month - 1, parts.day)));
 }
 
 export function getScheduleWeekWindow(now = new Date()): { start: string; end: string } {
@@ -81,12 +88,15 @@ export function parseScheduleAdjustment(value: unknown): ScheduleAdjustmentPaylo
       && cell.classIndex >= 0
     ))
     : [];
+  const dayOverrideValidation = validateDayOverrides(candidate.dayOverrides, validation.data, candidate.weekStart);
+  if (!dayOverrideValidation.success) return null;
   return {
     weekStart: candidate.weekStart,
     weekIndex,
     sourceDraftVersion,
     config: validation.data,
     changedCells,
+    ...(dayOverrideValidation.data.length ? { dayOverrides: dayOverrideValidation.data } : {}),
   };
 }
 
@@ -102,6 +112,8 @@ export function validateAdjustmentConfig(
   baseConfig: ScheduleConfig,
   nextConfig: ScheduleConfig,
   weekIndex: number,
+  dayOverrides?: unknown,
+  weekStart?: string,
 ): { success: true } | { success: false; issues: ValidationIssue[] } {
   if (!Number.isInteger(weekIndex) || weekIndex < 0 || weekIndex > 3) {
     return { success: false, issues: [{ path: "weekIndex", message: "轮换周次必须是第 1 至第 4 周" }] };
@@ -157,6 +169,13 @@ export function validateAdjustmentConfig(
         }
       }
     }
+  }
+
+  if (dayOverrides !== undefined) {
+    // Make-up days change a day's template by design, so they are validated on
+    // their own terms rather than through the "template must not move" rule.
+    const overrideValidation = validateDayOverrides(dayOverrides, nextConfig, weekStart ?? getScheduleWeekWindow().start);
+    if (!overrideValidation.success) issues.push(...overrideValidation.issues);
   }
 
   return issues.length ? { success: false, issues } : { success: true };
@@ -261,5 +280,25 @@ export function getEffectiveScheduleConfig(
     ...day,
     classList: day.classList.map((value) => getCourseForWeek(value, adjustment.weekIndex)),
   }));
-  return next;
+  return applyDayOverrides(next, adjustment.dayOverrides, adjustment.weekStart, adjustment.weekIndex);
+}
+
+/**
+ * The config a specific calendar date should show.
+ *
+ * `/config.json` hands the Electron client one flat weekly view, so a make-up
+ * day has to be baked in before it leaves the server: on that date the board
+ * must present the borrowed day's lessons, not the weekly pattern.
+ */
+export function getEffectiveConfigForDate(
+  publishedConfig: ScheduleConfig,
+  adjustment: ScheduleAdjustmentPayload | null,
+  date: string,
+  now = new Date(),
+): ScheduleConfig {
+  const effective = getEffectiveScheduleConfig(publishedConfig, adjustment, now);
+  if (!adjustment || !isAdjustmentActive(adjustment, now) || !adjustment.dayOverrides?.length) {
+    return effective;
+  }
+  return applyDayOverrides(effective, adjustment.dayOverrides, adjustment.weekStart, adjustment.weekIndex);
 }

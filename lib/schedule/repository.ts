@@ -1,8 +1,10 @@
 import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { DEFAULT_CLASS_ID } from "./classes";
 import {
   getAdjustmentChangedCells,
+  getEffectiveConfigForDate,
   getEffectiveScheduleConfig,
   getScheduleWeekWindow,
   isAdjustmentActive,
@@ -10,6 +12,7 @@ import {
   validateAdjustmentConfig,
 } from "./adjustment";
 import { createBlankConfig } from "./initial-config";
+import { validateDayOverrides } from "./date-override";
 import { normalizeScheduleConfig } from "./normalize";
 import type {
   ScheduleConfig,
@@ -20,7 +23,21 @@ import type {
 } from "./types";
 import { validateScheduleConfig } from "./validation";
 
-const DOCUMENT_ID = "default";
+/**
+ * Every schedule row is partitioned by class id.
+ *
+ * `classId` is the `Class.id` and therefore also the `ScheduleDocument.id`; the
+ * historical single schedule keeps the id `default`. There is deliberately no
+ * "current class" module-level state here: each caller resolves the class from
+ * the request and passes it down, so two classes can never be confused by a
+ * shared mutable default.
+ */
+export type ClassId = string;
+
+export function resolveClassId(classId?: string | null): ClassId {
+  const candidate = classId?.trim();
+  return candidate || DEFAULT_CLASS_ID;
+}
 
 function toInputJson(value: unknown): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
@@ -63,24 +80,42 @@ function deriveAdjustmentChangedCells(
   };
 }
 
-export async function ensureScheduleDocument() {
-  const existing = await prisma.scheduleDocument.findUnique({ where: { id: DOCUMENT_ID } });
+/**
+ * Returns the class's document, creating an empty one on first use.
+ *
+ * Lazy creation matters because classes are created through the admin UI and by
+ * migration; someone must be able to open a brand-new class before any schedule
+ * has been written for it.
+ */
+export async function ensureScheduleDocument(classIdInput?: string | null) {
+  const classId = resolveClassId(classIdInput);
+  const existing = await prisma.scheduleDocument.findUnique({ where: { id: classId } });
   if (existing) return existing;
 
   const config = createBlankConfig();
-  return prisma.scheduleDocument.create({
-    data: {
-      id: DOCUMENT_ID,
-      draftConfig: toInputJson(config),
-      publishedConfig: toInputJson(config),
-      draftVersion: 1,
-      publishedVersion: 1,
-    },
-  });
+  try {
+    return await prisma.scheduleDocument.create({
+      data: {
+        id: classId,
+        draftConfig: toInputJson(config),
+        publishedConfig: toInputJson(config),
+        draftVersion: 1,
+        publishedVersion: 1,
+      },
+    });
+  } catch (error) {
+    // Two first visitors can race here; the loser re-reads the winner's row.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      const created = await prisma.scheduleDocument.findUnique({ where: { id: classId } });
+      if (created) return created;
+    }
+    throw error;
+  }
 }
 
-export async function getScheduleDocumentView(): Promise<ScheduleDocumentView> {
-  const document = await ensureScheduleDocument();
+export async function getScheduleDocumentView(classIdInput?: string | null): Promise<ScheduleDocumentView> {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   const currentWeek = getScheduleWeekWindow();
   const draftConfig = asConfig(document.draftConfig);
   const publishedConfig = asConfig(document.publishedConfig);
@@ -116,25 +151,28 @@ export async function getScheduleDocumentView(): Promise<ScheduleDocumentView> {
   };
 }
 
-export async function getPublishedConfig(): Promise<ScheduleConfig> {
-  const document = await ensureScheduleDocument();
+export async function getPublishedConfig(classIdInput?: string | null, date?: string): Promise<ScheduleConfig> {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   const publishedConfig = asConfig(document.publishedConfig);
   const adjustment = parseScheduleAdjustment(document.temporaryAdjustmentPublishedConfig ?? (
     document.temporaryAdjustmentPublishedAt ? document.temporaryAdjustment : null
   ));
   const publishedAdjustment = document.temporaryAdjustmentPublishedAt ? adjustment : null;
+  if (date) return getEffectiveConfigForDate(publishedConfig, publishedAdjustment, date);
   return getEffectiveScheduleConfig(publishedConfig, publishedAdjustment);
 }
 
-export async function saveDraft(config: ScheduleConfig, expectedDraftVersion?: number) {
-  const document = await ensureScheduleDocument();
+export async function saveDraft(classIdInput: string | null | undefined, config: ScheduleConfig, expectedDraftVersion?: number) {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   if (expectedDraftVersion !== undefined && expectedDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
 
   const normalized = normalizeScheduleConfig(config).config;
   const updated = await prisma.scheduleDocument.update({
-    where: { id: "default" },
+    where: { id: classId },
     data: {
       draftConfig: toInputJson(normalized),
       draftVersion: { increment: 1 },
@@ -150,20 +188,23 @@ export async function saveDraft(config: ScheduleConfig, expectedDraftVersion?: n
 }
 
 export async function saveTemporaryAdjustment(
+  classIdInput: string | null | undefined,
   config: ScheduleConfig,
   weekStart: string,
   weekIndex: number,
   sourceDraftVersion: number,
   expectedAdjustmentVersion?: number,
+  dayOverrides?: unknown,
 ) {
-  const document = await ensureScheduleDocument();
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   const currentWeek = getScheduleWeekWindow();
   if (weekStart !== currentWeek.start) {
     return { conflict: false as const, expired: true as const, currentWeek };
   }
   const expectedVersion = expectedAdjustmentVersion ?? document.temporaryAdjustmentVersion;
   if (expectedVersion !== document.temporaryAdjustmentVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
 
   const normalized = normalizeScheduleConfig(config).config;
@@ -186,10 +227,17 @@ export async function saveTemporaryAdjustment(
     };
   }
   if (sourceDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
   const baseConfig = asConfig(document.draftConfig);
-  const adjustmentValidation = validateAdjustmentConfig(baseConfig, normalized, weekIndex);
+  // Make-up days legitimately change a day's template, so they are checked
+  // separately from the "courses only" rule below.
+  const overrideValidation = validateDayOverrides(dayOverrides, normalized, weekStart);
+  if (!overrideValidation.success) {
+    return { conflict: false as const, invalid: true as const, issues: overrideValidation.issues };
+  }
+  const previousOverrides = continuingAdjustment?.dayOverrides;
+  const adjustmentValidation = validateAdjustmentConfig(baseConfig, normalized, weekIndex, previousOverrides, weekStart);
   if (!adjustmentValidation.success) {
     return { conflict: false as const, invalid: true as const, issues: adjustmentValidation.issues };
   }
@@ -200,9 +248,10 @@ export async function saveTemporaryAdjustment(
     sourceDraftVersion,
     config: normalized,
     changedCells: getAdjustmentChangedCells(baseConfig, normalized, weekIndex),
+    ...(overrideValidation.data.length ? { dayOverrides: overrideValidation.data } : {}),
   };
   const updateWhere: Prisma.ScheduleDocumentWhereInput = {
-    id: DOCUMENT_ID,
+    id: classId,
     temporaryAdjustmentVersion: expectedVersion,
     draftVersion: sourceDraftVersion,
   };
@@ -214,18 +263,19 @@ export async function saveTemporaryAdjustment(
       temporaryAdjustmentUpdatedAt: new Date(),
     },
   });
-  if (updatedCount.count !== 1) return { conflict: true as const, current: await getScheduleDocumentView() };
-  return { conflict: false as const, expired: false as const, invalid: false as const, current: await getScheduleDocumentView() };
+  if (updatedCount.count !== 1) return { conflict: true as const, current: await getScheduleDocumentView(classId) };
+  return { conflict: false as const, expired: false as const, invalid: false as const, current: await getScheduleDocumentView(classId) };
 }
 
-export async function clearTemporaryAdjustment(expectedAdjustmentVersion?: number) {
-  const document = await ensureScheduleDocument();
+export async function clearTemporaryAdjustment(classIdInput: string | null | undefined, expectedAdjustmentVersion?: number) {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   const expectedVersion = expectedAdjustmentVersion ?? document.temporaryAdjustmentVersion;
   if (expectedVersion !== document.temporaryAdjustmentVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
   const updatedCount = await prisma.scheduleDocument.updateMany({
-    where: { id: DOCUMENT_ID, temporaryAdjustmentVersion: expectedVersion },
+    where: { id: classId, temporaryAdjustmentVersion: expectedVersion },
     data: {
       temporaryAdjustment: Prisma.JsonNull,
       temporaryAdjustmentVersion: { increment: 1 },
@@ -234,8 +284,8 @@ export async function clearTemporaryAdjustment(expectedAdjustmentVersion?: numbe
       temporaryAdjustmentPublishedConfig: Prisma.JsonNull,
     },
   });
-  if (updatedCount.count !== 1) return { conflict: true as const, current: await getScheduleDocumentView() };
-  return { conflict: false as const, current: await getScheduleDocumentView() };
+  if (updatedCount.count !== 1) return { conflict: true as const, current: await getScheduleDocumentView(classId) };
+  return { conflict: false as const, current: await getScheduleDocumentView(classId) };
 }
 
 function asRevisionView(revision: {
@@ -256,25 +306,31 @@ function asRevisionView(revision: {
   };
 }
 
-export async function listRevisions(): Promise<ScheduleRevisionView[]> {
-  await ensureScheduleDocument();
+export async function listRevisions(classIdInput?: string | null): Promise<ScheduleRevisionView[]> {
+  const classId = resolveClassId(classIdInput);
+  await ensureScheduleDocument(classId);
   const revisions = await prisma.scheduleRevision.findMany({
-    where: { documentId: DOCUMENT_ID },
+    where: { documentId: classId },
     orderBy: { createdAt: "desc" },
     take: 50,
   });
   return revisions.map(asRevisionView);
 }
 
-export async function createDraftRevision(note?: string, expectedDraftVersion?: number) {
-  const document = await ensureScheduleDocument();
+export async function createDraftRevision(
+  classIdInput: string | null | undefined,
+  note?: string,
+  expectedDraftVersion?: number,
+) {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   if (expectedDraftVersion !== undefined && expectedDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
 
   const revision = await prisma.scheduleRevision.create({
     data: {
-      documentId: DOCUMENT_ID,
+      documentId: classId,
       draftVersion: document.draftVersion,
       publishedVersion: document.publishedVersion,
       config: toInputJson(asConfig(document.draftConfig)),
@@ -285,14 +341,19 @@ export async function createDraftRevision(note?: string, expectedDraftVersion?: 
   return { conflict: false as const, revision: asRevisionView(revision) };
 }
 
-export async function restoreRevision(revisionId: number, expectedDraftVersion?: number) {
-  const document = await ensureScheduleDocument();
+export async function restoreRevision(
+  classIdInput: string | null | undefined,
+  revisionId: number,
+  expectedDraftVersion?: number,
+) {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   if (expectedDraftVersion !== undefined && expectedDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
 
   const revision = await prisma.scheduleRevision.findFirst({
-    where: { id: revisionId, documentId: DOCUMENT_ID },
+    where: { id: revisionId, documentId: classId },
   });
   if (!revision) return { conflict: false as const, notFound: true as const };
 
@@ -302,7 +363,7 @@ export async function restoreRevision(revisionId: number, expectedDraftVersion?:
 
   await prisma.$transaction(async (transaction) => {
     const updated = await transaction.scheduleDocument.update({
-      where: { id: DOCUMENT_ID },
+      where: { id: classId },
       data: {
         draftConfig: toInputJson(validation.data),
         draftVersion: { increment: 1 },
@@ -311,7 +372,7 @@ export async function restoreRevision(revisionId: number, expectedDraftVersion?:
     });
     await transaction.scheduleRevision.create({
       data: {
-        documentId: DOCUMENT_ID,
+        documentId: classId,
         draftVersion: updated.draftVersion,
         publishedVersion: updated.publishedVersion,
         config: toInputJson(validation.data),
@@ -321,13 +382,14 @@ export async function restoreRevision(revisionId: number, expectedDraftVersion?:
     });
   });
 
-  return { conflict: false as const, notFound: false as const, current: await getScheduleDocumentView() };
+  return { conflict: false as const, notFound: false as const, current: await getScheduleDocumentView(classId) };
 }
 
-export async function publishDraft(expectedDraftVersion?: number) {
-  const document = await ensureScheduleDocument();
+export async function publishDraft(classIdInput: string | null | undefined, expectedDraftVersion?: number) {
+  const classId = resolveClassId(classIdInput);
+  const document = await ensureScheduleDocument(classId);
   if (expectedDraftVersion !== undefined && expectedDraftVersion !== document.draftVersion) {
-    return { conflict: true as const, current: await getScheduleDocumentView() };
+    return { conflict: true as const, current: await getScheduleDocumentView(classId) };
   }
 
   const draft = asConfig(document.draftConfig);
@@ -356,7 +418,7 @@ export async function publishDraft(expectedDraftVersion?: number) {
 
   const updated = await prisma.$transaction(async (transaction) => {
     const next = await transaction.scheduleDocument.update({
-      where: { id: DOCUMENT_ID },
+      where: { id: classId },
       data: {
         previousPublishedConfig: toInputJson(document.publishedConfig),
         publishedConfig: toInputJson(validation.data),
@@ -373,7 +435,7 @@ export async function publishDraft(expectedDraftVersion?: number) {
     });
     await transaction.scheduleRevision.create({
       data: {
-        documentId: DOCUMENT_ID,
+        documentId: classId,
         draftVersion: next.draftVersion,
         publishedVersion: next.publishedVersion,
         config: toInputJson(validation.data),
@@ -383,7 +445,7 @@ export async function publishDraft(expectedDraftVersion?: number) {
     });
     return next;
   });
-  const current = await getScheduleDocumentView();
+  const current = await getScheduleDocumentView(classId);
   return {
     conflict: false as const,
     invalid: false as const,

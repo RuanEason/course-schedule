@@ -11,13 +11,29 @@ import {
 import {
   applyAdjustmentOverlay,
   getAdjustmentChangedCells,
+  getEffectiveConfigForDate,
   getEffectiveScheduleConfig,
+  getScheduleToday,
   getScheduleWeekWindow,
   isAdjustmentActive,
   setAdjustmentCourse,
   swapAdjustmentCourses,
   validateAdjustmentConfig,
 } from "@/lib/schedule/adjustment";
+import {
+  applyDayOverrides,
+  buildOverrideFromCopyDay,
+  getClassesForTemplateFromDay,
+  resolveDateSchedule,
+  setDayOverride,
+  validateDayOverrides,
+} from "@/lib/schedule/date-override";
+import {
+  dateForDayIndex,
+  dayIndexForDate,
+  getWeekDates,
+  isWeekendDate,
+} from "@/lib/schedule/week-dates";
 import { diffScheduleConfigs } from "@/lib/schedule/diff";
 import {
   addTemplateRow,
@@ -36,7 +52,7 @@ import {
   parseSubjectCode,
   validateSubjectCodeFields,
 } from "@/lib/schedule/subject-code";
-import { PLACEHOLDER_SUBJECT_CODE, getCourseForWeek, type TemplateRow } from "@/lib/schedule/types";
+import { PLACEHOLDER_SUBJECT_CODE, getCourseForWeek, isMeaningfullyRotating, type TemplateRow } from "@/lib/schedule/types";
 import {
   buildOccupancyHint,
   clampMove,
@@ -651,3 +667,230 @@ describe("time occupancy", () => {
     expect(findOverlap(getOccupiedRanges(occupiedRows), next)).toBeNull();
   });
 });
+
+describe("weekday and date mapping", () => {
+  // The window runs Monday -> Sunday while `daily_class` runs Sunday ->
+  // Saturday. These two orderings disagree, so pin the conversion down.
+  it("expands a Monday week start into seven Monday-first dates", () => {
+    const dates = getWeekDates("2026-08-31");
+
+    expect(dates).toHaveLength(7);
+    expect(dates?.[0]).toBe("2026-08-31");
+    expect(dates?.[6]).toBe("2026-09-06");
+  });
+
+  it("maps Monday to daily_class index 1 and Sunday to index 0", () => {
+    expect(dateForDayIndex("2026-08-31", 1)).toBe("2026-08-31");
+    expect(dateForDayIndex("2026-08-31", 0)).toBe("2026-09-06");
+    expect(dateForDayIndex("2026-08-31", 6)).toBe("2026-09-05");
+  });
+
+  it("round-trips a date back to its daily_class index", () => {
+    for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+      const date = dateForDayIndex("2026-08-31", dayIndex);
+      expect(date).not.toBeNull();
+      expect(dayIndexForDate("2026-08-31", date as string)).toBe(dayIndex);
+    }
+  });
+
+  it("rejects dates outside the week and malformed input", () => {
+    expect(dayIndexForDate("2026-08-31", "2026-08-30")).toBeNull();
+    expect(dayIndexForDate("2026-08-31", "2026-09-07")).toBeNull();
+    expect(dayIndexForDate("2026-08-31", "not-a-date")).toBeNull();
+    expect(dateForDayIndex("2026-08-31", 9)).toBeNull();
+  });
+
+  it("identifies weekend dates from the calendar, not the index", () => {
+    expect(isWeekendDate("2026-09-05")).toBe(true);
+    expect(isWeekendDate("2026-09-06")).toBe(true);
+    expect(isWeekendDate("2026-08-31")).toBe(false);
+  });
+
+  it("derives today in Shanghai time", () => {
+    expect(getScheduleToday(new Date("2026-08-30T15:59:59.000Z"))).toBe("2026-08-30");
+    expect(getScheduleToday(new Date("2026-08-30T16:00:00.000Z"))).toBe("2026-08-31");
+  });
+});
+
+describe("date overrides (make-up days)", () => {
+  const WEEK_START = "2026-08-31"; // Monday
+  const SUNDAY = "2026-09-06";
+
+  /** A weekend day that only has 2 slots, like the default blank config. */
+  function weekendConfig() {
+    const config = createBlankConfig();
+    config.subject_name.CH = "语文";
+    config.daily_class[1].classList = ["CH", "MA", "EN"];
+    return config;
+  }
+
+  it("fills a 2-slot weekend day with the 3 lessons of the source day", () => {
+    // This is the reported bug: switching a weekend to "workday" used to leave
+    // every slot reading TBD because lessons were taken from the day's own,
+    // too-short classList instead of from the source day.
+    const config = weekendConfig();
+    const { classList, placeholderCount } = getClassesForTemplateFromDay(config, 1, "workday", 0);
+
+    expect(classList).toEqual(["CH", "MA", "EN"]);
+    expect(placeholderCount).toBe(0);
+  });
+
+  it("reports slots the source day cannot cover instead of silently emptying them", () => {
+    const config = createBlankConfig();
+    config.daily_class[1].classList = ["CH"];
+
+    const { classList, placeholderCount } = getClassesForTemplateFromDay(config, 1, "workday", 0);
+
+    expect(classList).toHaveLength(3);
+    expect(classList[0]).toBe("CH");
+    expect(classList[1]).toBe(PLACEHOLDER_SUBJECT_CODE);
+    expect(classList[2]).toBe(PLACEHOLDER_SUBJECT_CODE);
+    expect(placeholderCount).toBe(2);
+  });
+
+  it("builds an override that borrows Monday for a Sunday", () => {
+    const config = weekendConfig();
+    const override = buildOverrideFromCopyDay(config, WEEK_START, SUNDAY, 1, "补周一的课");
+
+    expect(override).toEqual({
+      date: SUNDAY,
+      template: "workday",
+      sourceDayIndex: 1,
+      label: "补周一的课",
+    });
+  });
+
+  it("refuses to build an override for a date outside the week", () => {
+    const config = weekendConfig();
+
+    expect(buildOverrideFromCopyDay(config, WEEK_START, "2026-09-13", 1)).toBeNull();
+    expect(buildOverrideFromCopyDay(config, WEEK_START, SUNDAY, 99)).toBeNull();
+  });
+
+  it("resolves a make-up day to the borrowed template and lessons", () => {
+    const config = weekendConfig();
+    const overrides = [buildOverrideFromCopyDay(config, WEEK_START, SUNDAY, 1, "补周一的课")!];
+
+    const resolved = resolveDateSchedule(config, overrides, WEEK_START, SUNDAY, 0);
+
+    expect(resolved?.template).toBe("workday");
+    expect(resolved?.classList).toEqual(["CH", "MA", "EN"]);
+    expect(resolved?.label).toBe("补周一的课");
+  });
+
+  it("returns null when no override applies to the date", () => {
+    const config = weekendConfig();
+
+    expect(resolveDateSchedule(config, [], WEEK_START, SUNDAY, 0)).toBeNull();
+    expect(resolveDateSchedule(config, undefined, WEEK_START, SUNDAY, 0)).toBeNull();
+  });
+
+  it("rewrites only the overridden day, leaving the weekly pattern intact", () => {
+    const config = weekendConfig();
+    const overrides = [buildOverrideFromCopyDay(config, WEEK_START, SUNDAY, 1)!];
+
+    const applied = applyDayOverrides(config, overrides, WEEK_START, 0);
+    const sundayIndex = dayIndexForDate(WEEK_START, SUNDAY);
+
+    expect(applied.daily_class[sundayIndex!].timetable).toBe("workday");
+    expect(applied.daily_class[sundayIndex!].classList).toEqual(["CH", "MA", "EN"]);
+    // Monday itself is untouched, and the source config is not mutated.
+    expect(applied.daily_class[1].classList).toEqual(["CH", "MA", "EN"]);
+    expect(config.daily_class[sundayIndex!].timetable).toBe("weekend");
+  });
+
+  it("keeps the borrowed lessons in step with the active rotation week", () => {
+    const config = weekendConfig();
+    config.daily_class[1].classList = [["CH", "MA", "EN", "CH"], "MA", "EN"];
+    const overrides = [buildOverrideFromCopyDay(config, WEEK_START, SUNDAY, 1)!];
+
+    expect(resolveDateSchedule(config, overrides, WEEK_START, SUNDAY, 0)?.classList[0]).toBe("CH");
+    expect(resolveDateSchedule(config, overrides, WEEK_START, SUNDAY, 2)?.classList[0]).toBe("EN");
+  });
+
+  it("validates overrides against the week and the available templates", () => {
+    const config = weekendConfig();
+
+    expect(validateDayOverrides([{ date: SUNDAY, sourceDayIndex: 1 }], config, WEEK_START).success).toBe(true);
+    expect(validateDayOverrides(undefined, config, WEEK_START)).toEqual({ success: true, data: [] });
+    expect(validateDayOverrides([{ date: "2026-09-13" }], config, WEEK_START).success).toBe(false);
+    expect(validateDayOverrides([{ date: SUNDAY, template: "nope" }], config, WEEK_START).success).toBe(false);
+    expect(validateDayOverrides([{ date: SUNDAY, sourceDayIndex: 9 }], config, WEEK_START).success).toBe(false);
+    expect(validateDayOverrides([{ date: SUNDAY }, { date: SUNDAY }], config, WEEK_START).success).toBe(false);
+  });
+
+  it("replaces or clears a single date without disturbing the others", () => {
+    const saturday = "2026-09-05";
+    const first = setDayOverride([], { date: SUNDAY, sourceDayIndex: 1 }, SUNDAY);
+    const both = setDayOverride(first, { date: saturday, sourceDayIndex: 1 }, saturday);
+
+    expect(both.map((item) => item.date)).toEqual([saturday, SUNDAY]);
+    expect(setDayOverride(both, null, SUNDAY).map((item) => item.date)).toEqual([saturday]);
+  });
+
+  it("reaches the published config for the overridden date only", () => {
+    const published = weekendConfig();
+    const overrides = [buildOverrideFromCopyDay(published, WEEK_START, SUNDAY, 1)!];
+    const adjustment = {
+      weekStart: WEEK_START,
+      weekIndex: 0,
+      sourceDraftVersion: 1,
+      config: published,
+      changedCells: [],
+      dayOverrides: overrides,
+    };
+    const duringWeek = new Date("2026-09-04T04:00:00.000Z");
+    const sundayIndex = dayIndexForDate(WEEK_START, SUNDAY)!;
+
+    expect(getEffectiveConfigForDate(published, adjustment, SUNDAY, duringWeek).daily_class[sundayIndex].classList)
+      .toEqual(["CH", "MA", "EN"]);
+    // An ordinary day in the same week still follows the weekly pattern.
+    expect(getEffectiveConfigForDate(published, adjustment, "2026-09-01", duringWeek).daily_class[2].timetable)
+      .toBe("workday");
+  });
+
+  it("lets the adjustment validator accept a make-up day", () => {
+    const config = weekendConfig();
+    const result = validateAdjustmentConfig(
+      config,
+      config,
+      0,
+      [{ date: SUNDAY, template: "workday", sourceDayIndex: 1 }],
+      WEEK_START,
+    );
+
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a make-up date that does not belong to the week being saved", () => {
+    const config = weekendConfig();
+    const result = validateAdjustmentConfig(
+      config,
+      config,
+      0,
+      [{ date: SUNDAY, template: "workday", sourceDayIndex: 1 }],
+      "2026-09-07",
+    );
+
+    expect(result.success).toBe(false);
+    if (!result.success) expect(result.issues[0]?.message).toContain("不在本周范围内");
+  });
+
+  it("still rejects a malformed make-up day", () => {
+    const config = weekendConfig();
+    const result = validateAdjustmentConfig(config, config, 0, [{ date: SUNDAY, template: "missing" }], WEEK_START);
+
+    expect(result.success).toBe(false);
+  });
+});
+
+describe("rotation badge", () => {
+  it("only marks a cell when the four weeks genuinely differ", () => {
+    // A plain adjustment used to raise "4W" on every touched cell.
+    expect(isMeaningfullyRotating(["TBD", "TBD", "EN", "TBD"])).toBe(true);
+    expect(isMeaningfullyRotating(["EN", "EN", "EN", "EN"])).toBe(false);
+    expect(isMeaningfullyRotating("EN")).toBe(false);
+    expect(isMeaningfullyRotating(undefined)).toBe(false);
+  });
+});
+

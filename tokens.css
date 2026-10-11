@@ -1,34 +1,37 @@
-/* Hallmark - macrostructure: Workbench - tone: utilitarian technical workbench - anchor hue: cobalt */
+/* Hallmark - macrostructure: Workbench - tone: neutral SaaS minimal - anchor hue: single indigo accent
+   Palette is a strict neutral Zinc ramp; colour is reserved for function (accent, status, subject hue). */
 :root {
-  --color-paper: oklch(98.2% 0.006 245);
-  --color-paper-2: oklch(96.2% 0.012 245);
-  --color-paper-3: oklch(93.5% 0.018 245);
-  --color-panel: oklch(99.4% 0.003 245);
-  --color-ink: oklch(24% 0.025 255);
-  --color-ink-2: oklch(39% 0.032 255);
-  --color-muted: oklch(57% 0.026 255);
-  --color-rule: oklch(87% 0.022 250);
-  --color-rule-strong: oklch(78% 0.032 250);
-  --color-accent: oklch(55% 0.19 265);
-  --color-accent-strong: oklch(46% 0.21 265);
-  --color-accent-soft: oklch(93% 0.045 265);
-  --color-accent-ink: oklch(99% 0.003 265);
-  --color-success: oklch(54% 0.145 151);
-  --color-success-soft: oklch(93% 0.045 151);
-  --color-success-ink: oklch(99% 0.003 151);
-  --color-success-rule: oklch(86% 0.055 151);
-  --color-error: oklch(55% 0.19 27);
-  --color-error-soft: oklch(94% 0.045 27);
-  --color-error-rule: oklch(86% 0.055 27);
-  --color-warning: oklch(68% 0.15 78);
-  --color-warning-soft: oklch(95% 0.045 82);
-  --color-warning-rule: oklch(86% 0.055 78);
-  --color-focus: oklch(60% 0.19 265);
-  --color-overlay: oklch(24% 0.025 255 / 0.18);
-  --color-accent-rule: oklch(86% 0.055 265);
-  --color-dark-rule: oklch(65% 0.02 255 / 0.5);
-  --color-dark-rule-soft: oklch(65% 0.02 255 / 0.28);
-  --color-event-ink: oklch(86% 0.15 80);
+  /* Surfaces: Zinc-50 base, pure white canvas, Zinc-100 chrome. */
+  --color-paper: #fafafa;
+  --color-paper-2: #f4f4f5;
+  --color-paper-3: #f4f4f6;
+  --color-panel: #ffffff;
+  --color-ink: #18181b;
+  --color-ink-2: #3f3f46;
+  --color-muted: #71717a;
+  --color-rule: #e4e4e7;
+  --color-rule-strong: #d4d4d8;
+  /* Single functional accent. */
+  --color-accent: #4f46e5;
+  --color-accent-strong: #4338ca;
+  --color-accent-soft: #eef2ff;
+  --color-accent-ink: #ffffff;
+  --color-success: #059669;
+  --color-success-soft: #ecfdf5;
+  --color-success-ink: #ffffff;
+  --color-success-rule: #a7f3d0;
+  --color-error: #dc2626;
+  --color-error-soft: #fef2f2;
+  --color-error-rule: #fecaca;
+  --color-warning: #b45309;
+  --color-warning-soft: #f4f4f6;
+  --color-warning-rule: #e4e4e7;
+  --color-focus: #4f46e5;
+  --color-overlay: rgb(24 24 27 / 0.18);
+  --color-accent-rule: #c7d2fe;
+  --color-dark-rule: rgb(113 113 122 / 0.5);
+  --color-dark-rule-soft: rgb(113 113 122 / 0.28);
+  --color-event-ink: #52525b;
 
   --font-display: var(--font-display-face), "Noto Sans SC", "Microsoft YaHei", sans-serif;
   --font-body: var(--font-body-face), "Noto Sans SC", "Microsoft YaHei", sans-serif;
@@ -55,27 +58,29 @@
   --text-2xl: 1.75rem;
 
   --topbar-height: 60px;
-  --activity-width: 52px;
+  --activity-width: 48px;
+  --sidebar-surface: var(--color-panel);
+  --sidebar-accent: var(--color-paper-3);
+  --sidebar-accent-ink: var(--color-ink);
+  --sidebar-border: var(--color-rule);
+  --sidebar-muted: var(--color-muted);
 
+  /* Tight radii: SaaS chrome is squared-off. Pill is kept only for status dots/avatars. */
   --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-md: 5px;
+  --radius-lg: 6px;
   --radius-pill: 999px;
   --rule-thin: 1px solid var(--color-rule);
-  --shadow-panel: 0 16px 36px -30px oklch(24% 0.025 255 / 0.6);
-  --shadow-float: 0 18px 36px -18px oklch(24% 0.025 255 / 0.28);
-  --shadow-lift-sm:
-    0 1px 1px oklch(24% 0.025 255 / 0.05),
-    0 10px 22px -14px oklch(24% 0.025 255 / 0.32);
-  --shadow-lift-md:
-    0 2px 4px oklch(24% 0.025 255 / 0.06),
-    0 16px 32px -16px oklch(24% 0.025 255 / 0.34);
-  --shadow-lift-accent:
-    0 1px 2px oklch(46% 0.21 265 / 0.08),
-    0 10px 24px -12px oklch(46% 0.21 265 / 0.32);
-  --color-rail-well: oklch(93.4% 0.018 248);
-  --color-rail-well-deep: oklch(90.8% 0.022 248);
-  --color-gutter: oklch(95.4% 0.008 248);
+  /* Border-first: card definition comes from 1px lines, not from lift. */
+  --shadow-panel: none;
+  --shadow-float: 0 8px 24px -12px rgb(24 24 27 / 0.16);
+  --shadow-lift-sm: none;
+  --shadow-lift-md: none;
+  --shadow-lift-accent: none;
+  --color-rail-well: #f4f4f5;
+  --color-rail-well-deep: #ebebed;
+  /* The single source of truth for every timetable hairline. */
+  --color-gutter: #e4e4e7;
 
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);

@@ -13,6 +13,10 @@ const corsHeaders = {
 
 export async function GET() {
   try {
+    // No date is passed on purpose: the published config is the flat weekly
+    // board the Electron client renders, with any make-up-day substitution
+    // already applied at publish time. Resolving a weekday here would return a
+    // different board from the one the editor published.
     const config = await getPublishedConfig();
     return new NextResponse(JSON.stringify(config), {
       status: 200,

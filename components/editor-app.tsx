@@ -32,7 +32,6 @@ import {
   LayoutGrid,
   Palette,
   PanelLeftClose,
-  PanelLeftOpen,
   Pencil,
   Plus,
   RefreshCw,
@@ -89,12 +88,14 @@ import {
 } from "@/lib/schedule/subject-code";
 import {
   getCourseForWeek,
+  isMeaningfullyRotating,
   isRotatingCourse,
   cloneConfig,
   PLACEHOLDER_SUBJECT_CODE,
   PLACEHOLDER_SUBJECT_NAME,
   WEEKDAYS,
   type ScheduleAdjustmentView,
+  type ScheduleDayOverride,
   type ScheduleDocumentView,
   type ScheduleRevisionView,
   type ScheduleConfig,
@@ -108,6 +109,15 @@ import {
   setAdjustmentCourse,
   swapAdjustmentCourses,
 } from "@/lib/schedule/adjustment";
+import {
+  buildOverrideFromCopyDay,
+  describeOverrideLabel,
+  applyDayOverrides,
+  getClassesForTemplateFromDay,
+  setDayOverride,
+  validateDayOverrides,
+} from "@/lib/schedule/date-override";
+import { dateForDayIndex, getWeekDates } from "@/lib/schedule/week-dates";
 import { parseTimeRange, ScheduleValidationError, validateScheduleConfig } from "@/lib/schedule/validation";
 
 type LoadState = "loading" | "ready" | "error";
@@ -561,58 +571,55 @@ function ActivityRail({
   adjustmentMode,
   onSelect,
   sidebarCollapsed,
-  onToggleSidebar,
+  onToggleActivePanel,
 }: {
   activePanel: WorkspacePanel;
   adjustmentMode: boolean;
   onSelect: (panel: WorkspacePanel) => void;
   sidebarCollapsed: boolean;
-  onToggleSidebar: () => void;
+  onToggleActivePanel: () => void;
 }) {
   const items: Array<{ id: WorkspacePanel; label: string; icon: React.ReactNode }> = adjustmentMode
     ? [
-        { id: "schedule", label: "课表", icon: <LayoutGrid size={19} /> },
-        { id: "inspector", label: "课程检查", icon: <Settings2 size={19} /> },
-        { id: "validity", label: "调课时效", icon: <Clock3 size={19} /> },
+        { id: "schedule", label: "课表", icon: <LayoutGrid size={16} /> },
+        { id: "inspector", label: "课程检查", icon: <Settings2 size={16} /> },
+        { id: "validity", label: "调课时效", icon: <Clock3 size={16} /> },
       ]
     : [
-        { id: "schedule", label: "课表", icon: <LayoutGrid size={19} /> },
-        { id: "templates", label: "日程模板", icon: <CalendarClock size={19} /> },
-        { id: "subjects", label: "课程库", icon: <BookOpen size={19} /> },
-        { id: "inspector", label: "课程检查", icon: <Settings2 size={19} /> },
-        { id: "style", label: "客户端样式", icon: <Palette size={19} /> },
-        { id: "preview", label: "客户端预览", icon: <Eye size={19} /> },
+        { id: "schedule", label: "课表", icon: <LayoutGrid size={16} /> },
+        { id: "templates", label: "日程模板", icon: <CalendarClock size={16} /> },
+        { id: "subjects", label: "课程库", icon: <BookOpen size={16} /> },
+        { id: "inspector", label: "课程检查", icon: <Settings2 size={16} /> },
+        { id: "style", label: "客户端样式", icon: <Palette size={16} /> },
+        { id: "preview", label: "客户端预览", icon: <Eye size={16} /> },
       ];
 
   return (
     <nav className="activity-rail" aria-label="编辑器工具">
       <div className="activity-items">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            className={`activity-button${activePanel === item.id ? " is-active" : ""}`}
-            type="button"
-            aria-label={item.label}
-            aria-current={activePanel === item.id ? "page" : undefined}
-            data-tooltip={item.label}
-            title={item.label}
-            onClick={() => onSelect(item.id)}
-          >
-            {item.icon}
-          </button>
-        ))}
+        {items.map((item) => {
+          const isActive = !sidebarCollapsed && activePanel === item.id;
+          return (
+            <button
+              key={item.id}
+              className={`activity-button${isActive ? " is-active" : ""}`}
+              type="button"
+              aria-label={item.label}
+              aria-current={isActive ? "page" : undefined}
+              aria-pressed={isActive || undefined}
+              data-tooltip={item.label}
+              title={item.label}
+              onClick={(event) => {
+                if (isActive) onToggleActivePanel();
+                else onSelect(item.id);
+                event.currentTarget.blur();
+              }}
+            >
+              {item.icon}
+            </button>
+          );
+        })}
       </div>
-      <button
-        className="activity-button activity-sidebar-toggle"
-        type="button"
-        aria-label={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-        aria-pressed={sidebarCollapsed}
-        data-tooltip={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-        title={sidebarCollapsed ? "展开侧栏" : "收起侧栏"}
-        onClick={onToggleSidebar}
-      >
-        {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
-      </button>
     </nav>
   );
 }
@@ -674,11 +681,20 @@ function SidebarHeader({ onCollapse }: { onCollapse: () => void }) {
   return (
     <div className="sidebar-header">
       <div className="sidebar-heading">
-        <span className="sidebar-kicker">WORKSPACE</span>
         <strong>编辑面板</strong>
       </div>
-      <button className="icon-button icon-button-subtle" type="button" aria-label="收起侧栏" data-tooltip="收起侧栏" title="收起侧栏" onClick={onCollapse}>
-        <PanelLeftClose size={17} />
+      <button
+        className="icon-button icon-button-subtle"
+        type="button"
+        aria-label="收起侧栏"
+        data-tooltip="收起侧栏"
+        title="收起侧栏"
+        onClick={(event) => {
+          onCollapse();
+          event.currentTarget.blur();
+        }}
+      >
+        <PanelLeftClose size={16} />
       </button>
     </div>
   );
@@ -1131,10 +1147,12 @@ function TemplatePanel({
   const templateNames = Object.keys(config.timetable);
   const rows = getTemplateRows(config, activeTemplate);
   const usageCount = config.daily_class.filter((day) => day.timetable === activeTemplate).length;
-  const usingDayLabels = config.daily_class.filter((day) => day.timetable === activeTemplate).map((day) => `周${day.Chinese}`);
   const [newTemplateName, setNewTemplateName] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [renameOpen, setRenameOpen] = useState(false);
   const [renameValue, setRenameValue] = useState(activeTemplate);
   const [deletePromptOpen, setDeletePromptOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(activeTemplate);
   const [replacementTemplate, setReplacementTemplate] = useState("");
   const [newTimeRange, setNewTimeRange] = useState(() => suggestNextFreeSlot(rows));
   const [newRowKind, setNewRowKind] = useState<"class" | "event">("class");
@@ -1172,6 +1190,7 @@ function TemplatePanel({
     commit((current) => addTemplate(current, name, PLACEHOLDER_SUBJECT_CODE), `已新增模板 ${name}`);
     selectTemplate(name);
     setNewTemplateName("");
+    setAddOpen(false);
   }
 
   function handleRename(event: React.FormEvent<HTMLFormElement>) {
@@ -1182,31 +1201,37 @@ function TemplatePanel({
     commit((current) => renameTemplate(current, activeTemplate, name), `已将模板重命名为 ${name}`);
     setActiveTemplate(name);
     setDeletePromptOpen(false);
+    setRenameOpen(false);
   }
 
-  function handleDuplicate() {
-    const name = suggestTemplateCopyName(templateNames, activeTemplate);
-    commit((current) => duplicateTemplate(current, activeTemplate, name), `已复制模板 ${name}`);
+  function handleDuplicate(sourceName: string) {
+    const name = suggestTemplateCopyName(templateNames, sourceName);
+    commit((current) => duplicateTemplate(current, sourceName, name), `已复制模板 ${name}`);
     selectTemplate(name);
-    announce(`已复制为「${name}」，可在副本上微调，原模板保持不变`);
+    announce(`已复制「${sourceName}」为「${name}」，可在副本上微调，原模板保持不变`);
   }
 
-  function openDeletePrompt() {
+  function openDeletePrompt(targetName: string) {
     if (templateNames.length < 2) return announce("至少保留一个日程模板");
-    setReplacementTemplate(templateNames.find((name) => name !== activeTemplate) ?? "");
+    setRenameOpen(false);
+    setDeleteTarget(targetName);
+    setReplacementTemplate(templateNames.find((name) => name !== targetName) ?? "");
     setDeletePromptOpen(true);
   }
 
   function handleConfirmDelete() {
-    const deletedName = activeTemplate;
-    const replacement = usageCount > 0 ? replacementTemplate : undefined;
-    if (usageCount > 0 && !templateNames.includes(replacementTemplate)) return announce("请选择删除后这些天要改用的模板");
-    const nextTemplate = usageCount > 0 ? replacementTemplate : templateNames.find((name) => name !== deletedName) ?? deletedName;
+    const deletedName = deleteTarget;
+    const usedByTarget = config.daily_class.filter((day) => day.timetable === deletedName);
+    const replacement = usedByTarget.length > 0 ? replacementTemplate : undefined;
+    if (usedByTarget.length > 0 && !templateNames.includes(replacementTemplate)) return announce("请选择删除后这些天要改用的模板");
+    const nextTemplate = activeTemplate === deletedName
+      ? (usedByTarget.length > 0 ? replacementTemplate : templateNames.find((name) => name !== deletedName) ?? deletedName)
+      : activeTemplate;
     commit((current) => removeTemplate(current, deletedName, replacement), `已删除模板 ${deletedName}`);
     setActiveTemplate(nextTemplate);
     setRenameValue(nextTemplate);
     setDeletePromptOpen(false);
-    announce(usageCount > 0 ? `已删除「${deletedName}」，使用中的日期已改用「${replacementTemplate}」` : `已删除模板「${deletedName}」`);
+    announce(usedByTarget.length > 0 ? `已删除「${deletedName}」，使用中的日期已改用「${replacementTemplate}」` : `已删除模板「${deletedName}」`);
   }
 
   function handleAddRow(event: React.FormEvent<HTMLFormElement>) {
@@ -1264,63 +1289,92 @@ function TemplatePanel({
         <CalendarClock size={18} aria-hidden="true" />
       </div>
 
-      <div className="template-list" role="list" aria-label="日程模板">
+      <div className="template-toolbar" role="toolbar" aria-label="日程模板">
         {templateNames.map((name) => (
-          <button
-            key={name}
-            className={`template-option${name === activeTemplate ? " is-active" : ""}`}
-            type="button"
-            onClick={() => selectTemplate(name)}
-          >
-            <span>{name}</span>
-            <span className="template-count">{getTemplateCourseCount(config, name)} 节</span>
-          </button>
+          <div className={`template-chip${name === activeTemplate ? " is-active" : ""}`} key={name}>
+            <button className="template-chip-select" type="button" onClick={() => selectTemplate(name)}>
+              <span>{name}</span>
+              <span className="template-count">{getTemplateCourseCount(config, name)} 节</span>
+            </button>
+            <button
+              className="template-chip-action"
+              type="button"
+              aria-label={`复制模板 ${name}`}
+              title={`复制 ${name}`}
+              onClick={() => handleDuplicate(name)}
+            >
+              <Copy size={13} />
+            </button>
+            <button
+              className="template-chip-action template-chip-danger"
+              type="button"
+              aria-label={`删除模板 ${name}`}
+              title={templateNames.length < 2 ? "至少保留一个日程模板" : `删除 ${name}`}
+              disabled={templateNames.length < 2}
+              onClick={() => openDeletePrompt(name)}
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
         ))}
+        <button
+          className={`template-chip template-chip-add${addOpen ? " is-open" : ""}`}
+          type="button"
+          aria-label="新增模板"
+          aria-expanded={addOpen}
+          title="新增模板"
+          onClick={() => setAddOpen((current) => !current)}
+        >
+          <Plus size={15} />
+        </button>
       </div>
 
-      <form className="compact-form" onSubmit={handleAddTemplate}>
-        <label htmlFor="new-template">新模板</label>
-        <div className="input-action-row">
-          <input id="new-template" value={newTemplateName} onChange={(event) => setNewTemplateName(event.target.value)} placeholder="例如 holiday" />
-          <button className="icon-button icon-button-accent" type="submit" aria-label="新增模板" title="新增模板">
-            <Plus size={16} />
-          </button>
-        </div>
-      </form>
-
-      <form className="compact-form" onSubmit={handleRename}>
-        <label htmlFor="rename-template">重命名当前模板</label>
-        <div className="input-action-row">
-          <input id="rename-template" value={renameValue} onChange={(event) => setRenameValue(event.target.value)} />
-          <button className="icon-button" type="submit" aria-label="保存模板名称" title="保存模板名称">
+      {addOpen ? (
+        <form className="template-inline-form" onSubmit={handleAddTemplate}>
+          <label className="visually-hidden" htmlFor="new-template">新模板名称</label>
+          <input
+            id="new-template"
+            autoFocus
+            value={newTemplateName}
+            onChange={(event) => setNewTemplateName(event.target.value)}
+            placeholder="新模板名称，例如 holiday"
+          />
+          <button className="icon-button icon-button-accent" type="submit" aria-label="确认新增模板" title="确认新增">
             <Check size={16} />
           </button>
-        </div>
-      </form>
+        </form>
+      ) : null}
 
-      <div className="template-actions">
-        <button className="secondary-button" type="button" onClick={handleDuplicate}>
-          <Copy size={14} />
-          复制模板
+      {renameOpen ? (
+        <form className="template-inline-form" onSubmit={handleRename}>
+          <label className="visually-hidden" htmlFor="rename-template">重命名 {activeTemplate}</label>
+          <input
+            id="rename-template"
+            autoFocus
+            value={renameValue}
+            onChange={(event) => setRenameValue(event.target.value)}
+            placeholder="模板新名称"
+          />
+          <button className="icon-button" type="submit" aria-label="保存模板名称" title="保存名称">
+            <Check size={16} />
+          </button>
+        </form>
+      ) : null}
+
+      <p className="template-toolbar-hint">
+        <Pencil size={12} />
+        正在编辑「{activeTemplate}」· {usageCount} 天使用
+        <button className="link-button" type="button" onClick={() => { setRenameValue(activeTemplate); setRenameOpen((current) => !current); }}>
+          重命名
         </button>
-        <button
-          className="secondary-button template-delete-button"
-          type="button"
-          onClick={openDeletePrompt}
-          disabled={templateNames.length < 2}
-          title={templateNames.length < 2 ? "至少保留一个日程模板" : "删除当前模板"}
-        >
-          <Trash2 size={14} />
-          删除模板
-        </button>
-      </div>
+      </p>
 
       {deletePromptOpen ? (
         <div className="template-delete-prompt" role="group" aria-label="确认删除模板">
-          {usageCount > 0 ? (
+          {config.daily_class.some((day) => day.timetable === deleteTarget) ? (
             <>
               <p>
-                「{activeTemplate}」正被 {usingDayLabels.join("、")} 使用。删除前请选择这些天改用哪个模板；课程槽数量不同时会按新模板增减。
+                「{deleteTarget}」正被 {config.daily_class.filter((day) => day.timetable === deleteTarget).map((day) => `周${day.Chinese}`).join("、")} 使用。删除前请选择这些天改用哪个模板；课程槽数量不同时会按新模板增减。
               </p>
               <label htmlFor="replacement-template">
                 改用模板
@@ -1329,14 +1383,14 @@ function TemplatePanel({
                   value={replacementTemplate}
                   onChange={(event) => setReplacementTemplate(event.target.value)}
                 >
-                  {templateNames.filter((name) => name !== activeTemplate).map((name) => (
+                  {templateNames.filter((name) => name !== deleteTarget).map((name) => (
                     <option key={name} value={name}>{name}</option>
                   ))}
                 </select>
               </label>
             </>
           ) : (
-            <p>「{activeTemplate}」当前没有被任何一天使用，删除后可用撤销恢复。</p>
+            <p>「{deleteTarget}」当前没有被任何一天使用，删除后可用撤销恢复。</p>
           )}
           <div className="template-delete-actions">
             <button className="secondary-button" type="button" onClick={() => setDeletePromptOpen(false)}>取消</button>
@@ -2212,6 +2266,100 @@ function PreviewPanel({ config, dayIndex, weekIndex }: { config: ScheduleConfig;
   );
 }
 
+function DayOverrideControl({
+  day,
+  dayIndex,
+  date,
+  weekStart,
+  config,
+  overrides,
+  onSet,
+  announce,
+}: {
+  day: ScheduleConfig["daily_class"][number];
+  dayIndex: number;
+  date: string;
+  weekStart: string;
+  config: ScheduleConfig;
+  overrides: ScheduleDayOverride[];
+  onSet: (next: ScheduleDayOverride[] | null) => void;
+  announce: (message: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const override = overrides.find((item) => item.date === date) ?? null;
+  const sourceDayIndex = override?.sourceDayIndex ?? dayIndex;
+  const preview = useMemo(
+    () => getClassesForTemplateFromDay(
+      config,
+      sourceDayIndex,
+      override?.template ?? config.daily_class[sourceDayIndex]?.timetable ?? day.timetable,
+      0,
+    ),
+    [config, day.timetable, override?.template, sourceDayIndex],
+  );
+
+  return (
+    <div className="day-override">
+      <button
+        className={`day-override-trigger${override ? " is-active" : ""}`}
+        type="button"
+        aria-expanded={open}
+        aria-label={`星期${day.Chinese}补课设置`}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <CalendarClock size={11} />
+        {override ? override.label ?? "已补课" : "补课"}
+      </button>
+      {open ? (
+        <div className="day-override-popover" role="group" aria-label={`星期${day.Chinese}补课设置`}>
+          <label htmlFor={`override-source-${dayIndex}`}>这天上哪天的课</label>
+          <select
+            id={`override-source-${dayIndex}`}
+            value={sourceDayIndex}
+            onChange={(event) => {
+              const nextSource = Number(event.target.value);
+              const built = buildOverrideFromCopyDay(
+                config,
+                weekStart,
+                date,
+                nextSource,
+                describeOverrideLabel(nextSource, WEEKDAYS[nextSource].Chinese),
+              );
+              if (!built) {
+                announce("补课设置失败，请检查日期");
+                return;
+              }
+              onSet(setDayOverride(overrides, built, date));
+              announce(`已把星期${day.Chinese}设为补星期${WEEKDAYS[nextSource].Chinese}的课`);
+            }}
+          >
+            {WEEKDAYS.map((option, index) => (
+              <option key={option.English} value={index}>星期{option.Chinese}</option>
+            ))}
+          </select>
+          <p className="day-override-preview">
+            将排入 {preview.classList.length} 节课
+            {preview.placeholderCount > 0 ? `，其中 ${preview.placeholderCount} 节待安排` : ""}
+          </p>
+          {override ? (
+            <button
+              className="secondary-button day-override-clear"
+              type="button"
+              onClick={() => {
+                onSet(setDayOverride(overrides, null, date));
+                setOpen(false);
+                announce(`已取消星期${day.Chinese}的补课`);
+              }}
+            >
+              <RotateCcw size={13} />取消补课
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function MatrixHeader({
   config,
   activeTemplate,
@@ -2221,6 +2369,9 @@ function MatrixHeader({
   setActiveTemplate,
   commit,
   announce,
+  dayOverrides,
+  weekStart,
+  onSetDayOverrides,
 }: {
   config: ScheduleConfig;
   activeTemplate: string;
@@ -2230,36 +2381,52 @@ function MatrixHeader({
   setActiveTemplate: (name: string) => void;
   commit: (updater: ConfigUpdater, message?: string) => void;
   announce: (message: string) => void;
+  dayOverrides: ScheduleDayOverride[];
+  weekStart: string;
+  onSetDayOverrides: (next: ScheduleDayOverride[]) => void;
 }) {
   const templateNames = Object.keys(config.timetable);
   return (
     <div className="matrix-header">
       <div className="matrix-label-cell"><span>节次</span><small>{activeTemplate}</small></div>
-      {config.daily_class.map((day, dayIndex) => (
-        <div className={`day-header${selectedDay === dayIndex ? " is-selected" : ""}`} key={dayIndex}>
-          <button type="button" onClick={() => { setSelectedDay(dayIndex); setActiveTemplate(day.timetable); }}>
-            <strong>{day.Chinese}</strong>
-            <span>{day.English}</span>
-          </button>
-          {adjustmentMode ? (
-            <span className="day-header-lock">本周锁定</span>
-          ) : (
-            <select
-              aria-label={`星期${day.Chinese}使用的日程模板`}
-              value={day.timetable}
-              onChange={(event) => {
-                const templateName = event.target.value;
-                if (!templateNames.includes(templateName)) return announce("日程模板不存在");
-                setSelectedDay(dayIndex);
-                setActiveTemplate(templateName);
-                commit((current) => assignDayTemplate(current, dayIndex, templateName, PLACEHOLDER_SUBJECT_CODE), `星期${day.Chinese}已切换到 ${templateName}`);
-              }}
-            >
-              {templateNames.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          )}
-        </div>
-      ))}
+      {config.daily_class.map((day, dayIndex) => {
+        const date = dateForDayIndex(weekStart, dayIndex) ?? "";
+        return (
+          <div className={`day-header${selectedDay === dayIndex ? " is-selected" : ""}`} key={dayIndex}>
+            <button type="button" onClick={() => { setSelectedDay(dayIndex); setActiveTemplate(day.timetable); }}>
+              <strong>{day.Chinese}</strong>
+              <span>{day.English}</span>
+            </button>
+            {date ? <span className="day-header-date">{formatScheduleDate(date)}</span> : null}
+            {adjustmentMode ? (
+              <DayOverrideControl
+                day={day}
+                dayIndex={dayIndex}
+                date={date}
+                weekStart={weekStart}
+                config={config}
+                overrides={dayOverrides}
+                onSet={(next) => onSetDayOverrides(next ?? [])}
+                announce={announce}
+              />
+            ) : (
+              <select
+                aria-label={`星期${day.Chinese}使用的日程模板`}
+                value={day.timetable}
+                onChange={(event) => {
+                  const templateName = event.target.value;
+                  if (!templateNames.includes(templateName)) return announce("日程模板不存在");
+                  setSelectedDay(dayIndex);
+                  setActiveTemplate(templateName);
+                  commit((current) => assignDayTemplate(current, dayIndex, templateName, PLACEHOLDER_SUBJECT_CODE), `星期${day.Chinese}已切换到 ${templateName}`);
+                }}
+              >
+                {templateNames.map((name) => <option key={name} value={name}>{name}</option>)}
+              </select>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2305,7 +2472,7 @@ function MatrixRow({
             id={`cell:desktop:${dayIndex}:${classIndex}`}
             code={code}
             name={config.subject_name[code] ?? PLACEHOLDER_SUBJECT_NAME}
-            rotated={isRotatingCourse(value ?? "")}
+            rotated={isMeaningfullyRotating(value)}
             adjustmentNote={adjustmentCells.get(`${dayIndex}:${classIndex}`)?.note}
             adjustmentTargetName={adjustmentCells.get(`${dayIndex}:${classIndex}`)?.targetName}
             selected={selectedCell?.dayIndex === dayIndex && selectedCell.classIndex === classIndex}
@@ -2331,6 +2498,9 @@ function ScheduleMatrix({
   commit,
   announce,
   weekIndex,
+  dayOverrides,
+  weekStart,
+  onSetDayOverrides,
 }: {
   config: ScheduleConfig;
   activeTemplate: string;
@@ -2344,6 +2514,9 @@ function ScheduleMatrix({
   commit: (updater: ConfigUpdater, message?: string) => void;
   announce: (message: string) => void;
   weekIndex: number;
+  dayOverrides: ScheduleDayOverride[];
+  weekStart: string;
+  onSetDayOverrides: (next: ScheduleDayOverride[]) => void;
 }) {
   const rows = getTemplateRows(config, activeTemplate);
   const selectedRows = getTemplateRows(config, config.daily_class[selectedDay]?.timetable ?? activeTemplate);
@@ -2364,14 +2537,23 @@ function ScheduleMatrix({
           {WEEKDAYS.map((day, index) => <button key={day.English} className={selectedDay === index ? "is-active" : ""} type="button" role="tab" aria-selected={selectedDay === index} onClick={() => { setSelectedDay(index); setActiveTemplate(config.daily_class[index]?.timetable ?? activeTemplate); }}>{day.Chinese}</button>)}
         </div>
         <div className="desktop-matrix" aria-label="星期课程矩阵">
-          <MatrixHeader config={config} activeTemplate={activeTemplate} adjustmentMode={adjustmentMode} selectedDay={selectedDay} setSelectedDay={setSelectedDay} setActiveTemplate={setActiveTemplate} commit={commit} announce={announce} />
+          <MatrixHeader config={config} activeTemplate={activeTemplate} adjustmentMode={adjustmentMode} selectedDay={selectedDay} setSelectedDay={setSelectedDay} setActiveTemplate={setActiveTemplate} commit={commit} announce={announce} dayOverrides={dayOverrides} weekStart={weekStart} onSetDayOverrides={onSetDayOverrides} />
           {rows.map((row) => <MatrixRow key={row.timeRange} row={row} config={config} activeTemplate={activeTemplate} selectedDay={selectedDay} adjustmentCells={adjustmentCells} selectedCell={selectedCell} onSelect={onSelect} weekIndex={weekIndex} />)}
         </div>
         <div className="mobile-matrix" aria-label="移动端课程矩阵">
           <div className="mobile-matrix-header">
             <div><strong>{WEEKDAYS[selectedDay].Chinese}</strong><span>{WEEKDAYS[selectedDay].English}</span></div>
             {adjustmentMode ? (
-              <span className="day-header-lock">本周锁定</span>
+              <DayOverrideControl
+                day={config.daily_class[selectedDay]}
+                dayIndex={selectedDay}
+                date={dateForDayIndex(weekStart, selectedDay) ?? ""}
+                weekStart={weekStart}
+                config={config}
+                overrides={dayOverrides}
+                onSet={(next) => onSetDayOverrides(next ?? [])}
+                announce={announce}
+              />
             ) : (
               <select
                 value={config.daily_class[selectedDay]?.timetable ?? activeTemplate}
@@ -2388,7 +2570,7 @@ function ScheduleMatrix({
             const value = config.daily_class[selectedDay]?.classList[classIndex];
             const code = getCourseForWeek(value, weekIndex);
             const adjustment = adjustmentCells.get(`${selectedDay}:${classIndex}`);
-            return <div className="mobile-row" key={row.timeRange}><span>{formatTimeRange(row.timeRange)}</span><CourseCell id={`cell:mobile:${selectedDay}:${classIndex}`} code={code} name={config.subject_name[code] ?? PLACEHOLDER_SUBJECT_NAME} rotated={isRotatingCourse(value ?? "")} adjustmentNote={adjustment?.note} adjustmentTargetName={adjustment?.targetName} selected={selectedCell?.dayIndex === selectedDay && selectedCell.classIndex === classIndex} onSelect={() => onSelect(selectedDay, classIndex)} /></div>;
+            return <div className="mobile-row" key={row.timeRange}><span>{formatTimeRange(row.timeRange)}</span><CourseCell id={`cell:mobile:${selectedDay}:${classIndex}`} code={code} name={config.subject_name[code] ?? PLACEHOLDER_SUBJECT_NAME} rotated={isMeaningfullyRotating(value)} adjustmentNote={adjustment?.note} adjustmentTargetName={adjustment?.targetName} selected={selectedCell?.dayIndex === selectedDay && selectedCell.classIndex === classIndex} onSelect={() => onSelect(selectedDay, classIndex)} /></div>;
           })}
         </div>
       </div>
@@ -2397,7 +2579,7 @@ function ScheduleMatrix({
   );
 }
 
-export function EditorApp({ user }: { user: PublicUser }) {
+export function EditorApp({ user, basePath = "", classId }: { user: PublicUser; basePath?: string; classId?: string }) {
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [config, setConfig] = useState<ScheduleConfig | null>(null);
   const [publishedConfig, setPublishedConfig] = useState<ScheduleConfig | null>(null);
@@ -2409,6 +2591,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
   const [adjustmentConfig, setAdjustmentConfig] = useState<ScheduleConfig | null>(null);
   const [adjustmentWeekIndex, setAdjustmentWeekIndex] = useState<number | null>(null);
   const [adjustmentSourceDraftVersion, setAdjustmentSourceDraftVersion] = useState(1);
+  const [adjustmentDayOverrides, setAdjustmentDayOverrides] = useState<ScheduleDayOverride[]>([]);
   const [adjustmentDirty, setAdjustmentDirty] = useState(false);
   const [isSavingAdjustment, setIsSavingAdjustment] = useState(false);
   const [isClearingAdjustment, setIsClearingAdjustment] = useState(false);
@@ -2484,7 +2667,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     setLoadState("loading");
     setLoadError("");
     try {
-      const response = await fetch("/api/schedule", { cache: "no-store" });
+      const response = await fetch(`${basePath}/api/schedule`, { cache: "no-store" });
       const data = await response.json() as ScheduleDocumentView & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "无法读取课表");
       applyScheduleView(data);
@@ -2493,7 +2676,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       setLoadError(errorMessage(error));
       setLoadState("error");
     }
-  }, [applyScheduleView]);
+  }, [applyScheduleView, basePath]);
 
   useEffect(() => {
     // The fetch is the external synchronization point for this client component.
@@ -2560,7 +2743,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
   const loadRevisions = useCallback(async () => {
     setRevisionsState("loading");
     try {
-      const response = await fetch("/api/schedule/revisions", { cache: "no-store" });
+      const response = await fetch(`${basePath}/api/schedule/revisions`, { cache: "no-store" });
       const data = await response.json() as { revisions?: ScheduleRevisionView[]; error?: string };
       if (!response.ok) throw new Error(data.error ?? "无法读取版本历史");
       setRevisions(data.revisions ?? []);
@@ -2569,7 +2752,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       setRevisionsState("error");
       setNotice(errorMessage(error));
     }
-  }, []);
+  }, [basePath]);
 
   useEffect(() => {
     if (!isHistoryOpen) return;
@@ -2584,7 +2767,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
   }, [isHistoryOpen, loadRevisions]);
 
   const requestDraftSave = useCallback(async (snapshot: ScheduleConfig, expectedVersion: number) => {
-    const response = await fetch("/api/schedule/draft", {
+    const response = await fetch(`${basePath}/api/schedule/draft`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: snapshot, expectedDraftVersion: expectedVersion }),
@@ -2600,7 +2783,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     if (response.status === 409 && data.current) throw new DraftConflictError(data.error ?? "草稿已被更新", data.current);
     if (!response.ok) throw new Error(data.issues?.map((issue: { path: string; message: string }) => `${issue.path}: ${issue.message}`).join("；") || data.error || "保存失败");
     return data as { draftVersion: number; draftUpdatedAt: string; updatedAt: string };
-  }, []);
+  }, [basePath]);
 
   const requestAdjustmentSave = useCallback(async (
     snapshot: ScheduleConfig,
@@ -2608,8 +2791,9 @@ export function EditorApp({ user }: { user: PublicUser }) {
     weekIndex: number,
     sourceDraftVersion: number,
     expectedAdjustmentVersion: number,
+    dayOverrides: ScheduleDayOverride[],
   ) => {
-    const response = await fetch("/api/schedule/adjustment", {
+    const response = await fetch(`${basePath}/api/schedule/adjustment`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2618,6 +2802,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
         weekIndex,
         sourceDraftVersion,
         expectedAdjustmentVersion,
+        dayOverrides,
       }),
     });
     const data = await response.json() as {
@@ -2641,7 +2826,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       temporaryAdjustmentUpdatedAt: string | null;
       currentWeek: ScheduleWeekWindow;
     };
-  }, []);
+  }, [basePath]);
 
   const cancelScheduledSave = useCallback(() => {
     if (!saveTimerRef.current) return;
@@ -2705,6 +2890,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       const baseWeekIndex = savedAdjustment?.weekIndex ?? weekIndex;
       setAdjustmentConfig(baseConfig);
       setAdjustmentWeekIndex(baseWeekIndex);
+      setAdjustmentDayOverrides(savedAdjustment?.dayOverrides ?? []);
       setAdjustmentSourceDraftVersion(sourceDraftVersion);
       setAdjustmentDirty(false);
       adjustmentUndoConfigRef.current = null;
@@ -2731,6 +2917,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     setIsAdjustmentMode(false);
     setAdjustmentConfig(null);
     setAdjustmentWeekIndex(null);
+    setAdjustmentDayOverrides([]);
     setAdjustmentDirty(false);
     adjustmentUndoConfigRef.current = null;
     setSelectedCell(null);
@@ -2748,6 +2935,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
         adjustmentWeekIndex,
         adjustmentSourceDraftVersion,
         temporaryAdjustmentVersion,
+        adjustmentDayOverrides,
       );
       setTemporaryAdjustment(result.temporaryAdjustment);
       setTemporaryAdjustmentVersion(result.temporaryAdjustmentVersion);
@@ -2755,6 +2943,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       setIsAdjustmentMode(false);
       setAdjustmentConfig(null);
       setAdjustmentWeekIndex(null);
+      setAdjustmentDayOverrides([]);
       setAdjustmentDirty(false);
       adjustmentUndoConfigRef.current = null;
       setSelectedCell(null);
@@ -2782,7 +2971,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     if (!window.confirm(confirmMessage)) return;
     setIsClearingAdjustment(true);
     try {
-      const response = await fetch("/api/schedule/adjustment", {
+      const response = await fetch(`${basePath}/api/schedule/adjustment`, {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expectedAdjustmentVersion: temporaryAdjustmentVersion }),
@@ -2805,6 +2994,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
       const baseConfig = config ? cloneConfig(config) : null;
       setAdjustmentConfig(baseConfig);
       setAdjustmentWeekIndex(weekIndex);
+      setAdjustmentDayOverrides([]);
       setAdjustmentSourceDraftVersion(draftVersion);
       setAdjustmentDirty(false);
       adjustmentUndoConfigRef.current = null;
@@ -2855,7 +3045,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     setIsCreatingRevision(true);
     try {
       const version = await flushDraft();
-      const response = await fetch("/api/schedule/revisions", {
+      const response = await fetch(`${basePath}/api/schedule/revisions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expectedDraftVersion: version, note: revisionNote }),
@@ -2890,7 +3080,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     setRestoringRevisionId(revisionId);
     cancelScheduledSave();
     try {
-      const response = await fetch("/api/schedule/revisions/restore", {
+      const response = await fetch(`${basePath}/api/schedule/revisions/restore`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ revisionId, expectedDraftVersion: draftVersion }),
@@ -3087,7 +3277,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
     setIsPublishing(true);
     try {
       const version = await flushDraft();
-      const response = await fetch("/api/schedule/publish", {
+      const response = await fetch(`${basePath}/api/schedule/publish`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ expectedDraftVersion: version }),
@@ -3137,7 +3327,14 @@ export function EditorApp({ user }: { user: PublicUser }) {
   }
 
   const templateNames = useMemo(() => (config ? Object.keys(config.timetable) : []), [config]);
-  const activeConfig = isAdjustmentMode ? adjustmentConfig : config;
+  // In adjustment mode the board shows make-up days already applied, so the
+  // teacher sees exactly what the week will look like before saving.
+  const activeConfig = useMemo(() => {
+    if (!isAdjustmentMode) return config;
+    if (!adjustmentConfig) return adjustmentConfig;
+    if (!adjustmentDayOverrides.length) return adjustmentConfig;
+    return applyDayOverrides(adjustmentConfig, adjustmentDayOverrides, currentWeek.start, adjustmentWeekIndex ?? 0);
+  }, [adjustmentConfig, adjustmentDayOverrides, adjustmentWeekIndex, config, currentWeek.start, isAdjustmentMode]);
   const activeWeekIndex = isAdjustmentMode ? adjustmentWeekIndex : weekIndex;
 
   if (loadState === "loading") {
@@ -3176,7 +3373,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
               <VersionMarker icon={<Send size={14} />} value={publishedVersion} label={`已发布 v${publishedVersion}`} />
               {publishedAt ? <VersionMarker icon={<Clock3 size={15} />} label={`更新于 ${new Date(publishedAt).toLocaleString("zh-CN", { hour12: false })}`} /> : null}
             </> : <span className="adjustment-validity-chip">{formatScheduleDate(currentWeek.start)} - {formatScheduleDate(currentWeek.end)}</span>}
-            <EditorPresence user={user} />
+            <EditorPresence user={user} basePath={basePath} classId={classId} />
           </div>
           <div className="topbar-actions">
             <input ref={fileInputRef} className="visually-hidden" type="file" accept="application/json,.json" onChange={handleImport} />
@@ -3246,7 +3443,16 @@ export function EditorApp({ user }: { user: PublicUser }) {
         </nav>
 
         <div className="editor-body">
-          <ActivityRail adjustmentMode={isAdjustmentMode} activePanel={activePanel} onSelect={setActivePanel} sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed((current) => !current)} />
+          <ActivityRail
+            adjustmentMode={isAdjustmentMode}
+            activePanel={activePanel}
+            onSelect={(panel) => {
+              setActivePanel(panel);
+              setSidebarCollapsed(false);
+            }}
+            sidebarCollapsed={sidebarCollapsed}
+            onToggleActivePanel={() => setSidebarCollapsed(true)}
+          />
           <div
             className="workbench-grid"
             style={{ "--left-rail-width": `${leftRailWidth}px` } as React.CSSProperties}
@@ -3272,7 +3478,7 @@ export function EditorApp({ user }: { user: PublicUser }) {
             <ResizeHandle side="left" width={leftRailWidth} onStart={startRailResize} onKeyboardResize={adjustRailWidth} />
 
             <div className="center-stage">
-              <ScheduleMatrix config={activeConfig} activeTemplate={activeTemplate} adjustmentMode={isAdjustmentMode} adjustmentCells={adjustmentCells} selectedDay={selectedDay} setSelectedDay={setSelectedDay} setActiveTemplate={setActiveTemplate} selectedCell={selectedCell} onSelect={(dayIndex, classIndex) => { setSelectedCell({ dayIndex, classIndex }); setActivePanel("inspector"); }} commit={commit} announce={announce} weekIndex={activeWeekIndex} />
+              <ScheduleMatrix config={activeConfig} activeTemplate={activeTemplate} adjustmentMode={isAdjustmentMode} adjustmentCells={adjustmentCells} selectedDay={selectedDay} setSelectedDay={setSelectedDay} setActiveTemplate={setActiveTemplate} selectedCell={selectedCell} onSelect={(dayIndex, classIndex) => { setSelectedCell({ dayIndex, classIndex }); setActivePanel("inspector"); }} commit={commit} announce={announce} weekIndex={activeWeekIndex} dayOverrides={isAdjustmentMode ? adjustmentDayOverrides : []} weekStart={currentWeek.start} onSetDayOverrides={(next) => { setAdjustmentDayOverrides(next); setAdjustmentDirty(true); }} />
               {importWarnings.length && !isAdjustmentMode ? (
                 <section className="warning-panel">
                   <div className="warning-heading"><AlertTriangle size={16} /><strong>导入兼容提示</strong><button className="icon-button" type="button" aria-label="关闭导入提示" title="关闭导入提示" onClick={() => setImportWarnings([])}><X size={15} /></button></div>

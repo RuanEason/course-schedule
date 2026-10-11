@@ -14,6 +14,9 @@ type MeResponse = { user?: PublicUser };
 interface ViewerAuthProps {
   corpId?: string;
   clientId?: string;
+  /** Prefix for the auth endpoints: `""` or `/class2`. */
+  basePath?: string;
+  classId?: string;
 }
 
 const AUTH_TIMEOUT_MS = 10_000;
@@ -22,8 +25,11 @@ const HIDE_ANIMATION_MS = 200;
 /**
  * Deduplicates concurrent auth flows so React StrictMode remounts (and any
  * accidental double mount) share a single request instead of racing.
+ *
+ * Keyed by base path: two classes in the same page load must not share one
+ * in-flight promise, or the second class would inherit the first one's user.
  */
-let pendingAuth: Promise<PublicUser | null> | null = null;
+const pendingAuth = new Map<string, Promise<PublicUser | null>>();
 
 function withTimeout<T>(promise: Promise<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -41,8 +47,8 @@ function withTimeout<T>(promise: Promise<T>): Promise<T> {
   });
 }
 
-async function fetchCurrentUser(): Promise<PublicUser | null> {
-  const response = await fetch("/api/auth/me", { cache: "no-store", credentials: "same-origin" });
+async function fetchCurrentUser(basePath: string): Promise<PublicUser | null> {
+  const response = await fetch(`${basePath}/api/auth/me`, { cache: "no-store", credentials: "same-origin" });
   if (response.status === 401) return null;
   if (!response.ok) throw new Error("无法读取当前用户");
 
@@ -50,13 +56,13 @@ async function fetchCurrentUser(): Promise<PublicUser | null> {
   return data?.user ?? null;
 }
 
-async function createDingTalkSession(corpId: string, clientId: string): Promise<PublicUser | null> {
+async function createDingTalkSession(basePath: string, corpId: string, clientId: string): Promise<PublicUser | null> {
   const { default: dd } = await import("dingtalk-jsapi");
   if (!isDingTalkContainer(dd.env?.platform)) return null;
   if (!corpId || !clientId) throw new Error("钉钉应用配置缺失");
 
   const result = await withTimeout(dd.requestAuthCode({ corpId, clientId }));
-  const response = await withTimeout(fetch("/api/auth/dingtalk", {
+  const response = await withTimeout(fetch(`${basePath}/api/auth/dingtalk`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -69,18 +75,20 @@ async function createDingTalkSession(corpId: string, clientId: string): Promise<
   return data.user;
 }
 
-function resolveUser(corpId: string, clientId: string): Promise<PublicUser | null> {
-  if (!pendingAuth) {
-    pendingAuth = (async () => {
-      const existing = await fetchCurrentUser();
-      if (existing) return existing;
-      return createDingTalkSession(corpId, clientId);
-    })().finally(() => { pendingAuth = null; });
-  }
-  return pendingAuth;
+function resolveUser(basePath: string, corpId: string, clientId: string): Promise<PublicUser | null> {
+  const existing = pendingAuth.get(basePath);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const current = await fetchCurrentUser(basePath);
+    if (current) return current;
+    return createDingTalkSession(basePath, corpId, clientId);
+  })().finally(() => { pendingAuth.delete(basePath); });
+  pendingAuth.set(basePath, promise);
+  return promise;
 }
 
-export function ViewerAuth({ corpId = "", clientId = "" }: ViewerAuthProps) {
+export function ViewerAuth({ corpId = "", clientId = "", basePath = "", classId }: ViewerAuthProps) {
   const [status, setStatus] = useState<AuthStatus>("checking");
   const [user, setUser] = useState<PublicUser | null>(null);
   const [isLeaving, setIsLeaving] = useState(false);
@@ -89,7 +97,7 @@ export function ViewerAuth({ corpId = "", clientId = "" }: ViewerAuthProps) {
     let cancelled = false;
     let hideTimer: ReturnType<typeof setTimeout> | null = null;
 
-    resolveUser(corpId, clientId).then(
+    resolveUser(basePath, corpId, clientId).then(
       (resolved) => {
         if (cancelled) return;
         if (resolved) {
@@ -112,14 +120,14 @@ export function ViewerAuth({ corpId = "", clientId = "" }: ViewerAuthProps) {
       cancelled = true;
       if (hideTimer) clearTimeout(hideTimer);
     };
-  }, [clientId, corpId]);
+  }, [basePath, clientId, corpId]);
 
   if (status === "anonymous") return null;
 
   if (status === "authenticated" && user) {
     return (
       <div className="viewer-auth">
-        <UserMenu user={user} showEditorLink showAdminLink />
+        <UserMenu user={user} basePath={basePath} classId={classId} showEditorLink showAdminLink showClassAdminLink />
       </div>
     );
   }
@@ -132,4 +140,3 @@ export function ViewerAuth({ corpId = "", clientId = "" }: ViewerAuthProps) {
     </div>
   );
 }
-

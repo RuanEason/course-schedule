@@ -1,6 +1,14 @@
 export type CourseValue = string | string[];
 export type TimetableValue = number | string;
 
+/** A single day deviating from the weekly pattern; see `date-override.ts`. */
+export interface ScheduleDayOverride {
+  date: string;
+  template?: string;
+  sourceDayIndex?: number;
+  label?: string;
+}
+
 export interface DailyClass {
   Chinese: string;
   English: string;
@@ -29,6 +37,8 @@ export interface ScheduleAdjustmentPayload {
   sourceDraftVersion: number;
   config: ScheduleConfig;
   changedCells: Array<{ dayIndex: number; classIndex: number }>;
+  /** Date-level overrides, e.g. a weekend running Monday's lessons. */
+  dayOverrides?: ScheduleDayOverride[];
 }
 
 export type ScheduleAdjustmentStatus = "draft" | "active";
@@ -94,6 +104,19 @@ export const PLACEHOLDER_SUBJECT_NAME = "待安排";
 
 export function isRotatingCourse(value: CourseValue): value is string[] {
   return Array.isArray(value);
+}
+
+/**
+ * True only when the four weeks actually differ.
+ *
+ * Any array-shaped value used to raise the "4W" badge, but an ordinary
+ * temporary adjustment converts a plain course into `["TBD","TBD","EN","TBD"]`.
+ * That is a one-week difference, not a rotation, and badging every adjusted
+ * cell trained users to ignore the mark entirely.
+ */
+export function isMeaningfullyRotating(value: CourseValue | undefined): boolean {
+  if (!Array.isArray(value)) return false;
+  return new Set(value).size > 1;
 }
 
 export function getCourseForWeek(value: CourseValue | undefined, weekIndex: number): string {

@@ -13,6 +13,27 @@
 
 编辑器里保存的是草稿；只有点击「发布」后，客户端拉取的 `/config.json` 才会更新。若当前自然周有已发布的临时调课，服务端会把本周有效结果合并进该接口，客户端无需单独处理调课接口。
 
+### 1.1 多班级：每个班一个客户端地址
+
+系统支持多个班级，**每个班级有各自独立的课表、草稿、临时调课、历史版本和编辑成员**。一个班级就是一个「标识」（slug，形如 `class2`），它同时决定两件事：
+
+1. 网页编辑入口：`https://cs.zyg2024.top/class2`、`/class2/editor`
+2. 客户端配置地址：`https://cs.zyg2024.top/class2/config.json`
+
+**根地址属于哪个班？** 由服务端 `CLASS_CONFIG_SLUG` 决定，默认 `default`（即「1 班」）。所以：
+
+| 班级 | 网页入口 | 客户端配置地址 |
+|------|----------|----------------|
+| 1 班（`default`） | `https://cs.zyg2024.top/` | `https://cs.zyg2024.top/config.json` |
+| 2 班（`class2`） | `https://cs.zyg2024.top/class2` | `https://cs.zyg2024.top/class2/config.json` |
+| 3 班（`class3`） | `https://cs.zyg2024.top/class3` | `https://cs.zyg2024.top/class3/config.json` |
+
+**已经装在教室里的客户端不需要改。** 它们请求的 `https://cs.zyg2024.top/config.json` 继续返回 `default` 班的课表。新增班级只是多一个地址，给新班级的电脑打包时把地址写成 `/classN/config.json` 即可。
+
+如果希望**用端口区分**（例如 2 班的机器固定访问 `:3002`），在 Nginx 里把端口映射到对应班级的路径即可，见第 9 节。两种写法返回的 JSON 完全相同。
+
+> 班级标识必须形如 `class` + 数字（`class2`、`class12`），创建后不可修改——它是数据分区键，也是地址的一部分。新增班级在网页端「班级管理」里操作，**不需要改代码、不需要重新部署**。
+
 ## 2. 客户端如何配置
 
 把客户端里原来的本地配置地址：
@@ -38,6 +59,8 @@ https://cs.zyg2024.top/config.json
 
 ### 3.1 `GET /config.json`
 
+班级对应的地址是 `GET /classN/config.json`；两者协议完全一致（同样的字段、CORS、缓存与错误行为），只是班级不同。下表以 `/config.json`（`default` 班）为例。
+
 - **Method**：`GET`（亦支持 `OPTIONS` 预检）
 - **Protocol**：HTTPS
 - **Content-Type**：`application/json; charset=utf-8`
@@ -48,11 +71,17 @@ https://cs.zyg2024.top/config.json
   - `Access-Control-Allow-Headers: Content-Type`
 - **缓存**：`Cache-Control: no-cache`
 - **失败**：服务不可用时返回 `503`，body 形如 `{ "error": "配置暂时不可用" }`
+- **班级不存在**：返回 `404`
 
 请求示例：
 
 ```http
 GET /config.json HTTP/1.1
+Host: cs.zyg2024.top
+```
+
+```http
+GET /class2/config.json HTTP/1.1
 Host: cs.zyg2024.top
 ```
 
@@ -242,22 +271,96 @@ https://cs.zyg2024.top/config.json
 
 | 能力 | 客户端 | Web（钉钉） |
 |------|--------|-------------|
-| 读已发布课表 | `GET /config.json` | 首页 / 登录后接口 |
-| 编辑草稿、调课、发布 | 不涉及 | `/editor` 等 |
-| 权限与职位策略 | 不涉及 | `/admin/access` |
+| 读已发布课表 | `GET /config.json`、`GET /classN/config.json` | 首页 / 登录后接口 |
+| 编辑草稿、调课、发布 | 不涉及 | `/editor`、`/classN/editor` |
+| 职位权限策略 | 不涉及 | `/admin/access` |
+| 新建班级、分配成员 | 不涉及 | `/admin/classes` |
 
-客户端只消费已发布配置；课表内容与样式一律以发布后的 `/config.json` 为准。
+客户端只消费已发布配置；课表内容与样式一律以发布后的配置地址为准。
+
+**编辑权限按班级隔离**：只有被分配到某个班级的老师（或钉钉主管理员）才能编辑该班课表。1 班的老师打开 `/class2/editor` 会得到 404，而不是看到 2 班的内容。
 
 ## 8. 验收清单
 
-- [ ] 客户端配置地址为 `https://cs.zyg2024.top/config.json`
+- [ ] 客户端配置地址为 `https://cs.zyg2024.top/config.json`（或对应班级的 `/classN/config.json`）
 - [ ] 启动能拉到 JSON，课程名、时间轴、分隔线正常
 - [ ] 四周轮换课按周次切换正确
 - [ ] `css_style` 为空时用默认样式；有值时变量生效
 - [ ] Web 端发布后，重启客户端可见更新
 - [ ] 本周有临时调课时，无需额外接口即可看到合并结果
 - [ ] 断网 / `503` 时有降级或错误提示
+- [ ] 多班级：2 班的配置地址只返回 2 班内容，改 2 班课表不影响 1 班
+
+## 9. 多班级部署（Nginx）
+
+只跑**一个** Next.js 实例；班级由 URL 路径区分。若需要用端口区分客户端，在同一个 `server` 块里按端口映射到对应班级的路径即可：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name cs.zyg2024.top;
+
+    # 所有班级共用这一个 location：/、/class2、/class2/config.json 都走同一实例
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        # 安全边界：班级由服务端根据路径推导，必须丢弃外部传入的伪造值
+        proxy_set_header x-class-schedule-class "";
+    }
+}
+
+server {
+    listen 3002 ssl;
+    server_name cs.zyg2024.top;
+
+    location = /config.json {
+        proxy_pass http://127.0.0.1:3000/class2/config.json;
+        proxy_set_header Host $host;
+        proxy_set_header x-class-schedule-class "";
+    }
+}
+
+server {
+    listen 3003 ssl;
+    server_name cs.zyg2024.top;
+
+    location = /config.json {
+        proxy_pass http://127.0.0.1:3000/class3/config.json;
+        proxy_set_header Host $host;
+        proxy_set_header x-class-schedule-class "";
+    }
+}
+```
+
+要点：
+
+- `x-class-schedule-class` 必须由 Nginx 清空。它只在服务端内部使用，用来把「这是哪个班」传给路由；外部请求带上它没有用（服务端会覆盖），但清空可以避免任何误解。
+- 新增班级时**只需要加一段 `server` 块**（如果需要端口）或直接用 `/classN/config.json`（无需改 Nginx）。
+- 若班级很多，可以用变量化简：
+
+```nginx
+map $server_port $class_slug {
+    3002    class2;
+    3003    class3;
+    3004    class4;
+}
+
+server {
+    listen 3002;
+    listen 3003;
+    listen 3004;
+    server_name cs.zyg2024.top;
+
+    location = /config.json {
+        proxy_pass http://127.0.0.1:3000/$class_slug/config.json;
+        proxy_set_header x-class-schedule-class "";
+    }
+}
+```
 
 ---
 
-参考：历史上本地开发对接地址为 `http://localhost:3000/config.json`；生产仅将主机改为 `cs.zyg2024.top`，路径与字段协议保持不变。
+参考：历史上本地开发对接地址为 `http://localhost:3000/config.json`；生产仅将主机改为 `cs.zyg2024.top`，路径与字段协议保持不变。多班级新增 `/classN/config.json`，根地址行为不变。

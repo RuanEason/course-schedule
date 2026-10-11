@@ -1,20 +1,9 @@
-import { notFound } from "next/navigation";
-
-import { DingTalkAuth } from "@/components/dingtalk-auth";
-import { EditorApp } from "@/components/editor-app";
-import { getCurrentUser, toPublicUser } from "@/lib/auth";
-import { getDingTalkPublicConfig } from "@/lib/dingtalk";
-import { isEditorEnabled } from "@/lib/editor-access";
+import { resolveDefaultClassId } from "@/lib/api/class-route";
+import { EditorPage } from "@/lib/pages/editor-page";
 
 export const dynamic = "force-dynamic";
 
-export default async function EditorPage() {
-  if (!isEditorEnabled()) notFound();
-  const user = await getCurrentUser();
-  if (!user) {
-    const config = getDingTalkPublicConfig();
-    return <DingTalkAuth {...config} returnTo="/editor" />;
-  }
-  if (!user.canEdit) notFound();
-  return <EditorApp user={toPublicUser(user)} />;
+export default async function EditorRoute() {
+  const classId = await resolveDefaultClassId();
+  return <EditorPage classId={classId} />;
 }

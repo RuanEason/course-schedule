@@ -8,7 +8,7 @@ import type { PublicUser } from "@/lib/auth";
 import { getTemplateRows } from "@/lib/schedule/editor-operations";
 import {
   getCourseForWeek,
-  isRotatingCourse,
+  isMeaningfullyRotating,
   PLACEHOLDER_SUBJECT_NAME,
   WEEKDAYS,
   type ScheduleConfig,
@@ -22,6 +22,12 @@ interface ScheduleViewerProps {
   user?: PublicUser;
   auth?: { corpId: string; clientId: string };
   publishedAt?: string | null;
+  /** Today in Asia/Shanghai as `YYYY-MM-DD`, used to open on the current day. */
+  today?: string | null;
+  /** Prefix for internal links and auth calls: `""` or `/class2`. */
+  basePath?: string;
+  classId?: string;
+  className?: string | null;
 }
 
 function formatTimeRange(timeRange: string) {
@@ -59,7 +65,7 @@ function ViewerRow({ config, row, activeTemplate, weekIndex }: {
         const code = getCourseForWeek(value, weekIndex);
         return (
           <div className="viewer-course-cell" key={dayIndex}>
-            <SubjectView config={config} code={code} rotating={isRotatingCourse(value ?? "")} />
+            <SubjectView config={config} code={code} rotating={isMeaningfullyRotating(value)} />
           </div>
         );
       })}
@@ -83,14 +89,34 @@ function MobileViewerRow({ config, row, dayIndex, weekIndex }: {
     <div className="viewer-mobile-row" key={row.timeRange}>
       <span>{formatTimeRange(row.timeRange)}</span>
       <div className="viewer-course-cell">
-        <SubjectView config={config} code={code} rotating={isRotatingCourse(value ?? "")} />
+        <SubjectView config={config} code={code} rotating={isMeaningfullyRotating(value)} />
       </div>
     </div>
   );
 }
 
-export function ScheduleViewer({ config, user, auth, publishedAt }: ScheduleViewerProps) {
-  const [selectedDay, setSelectedDay] = useState(1);
+/** Weekday index (Sunday = 0) of an `YYYY-MM-DD` string, or null when unusable. */
+function weekdayIndexFromIsoDate(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).getUTCDay();
+}
+
+export function ScheduleViewer({
+  config,
+  user,
+  auth,
+  publishedAt,
+  today,
+  basePath = "",
+  classId,
+  className = null,
+}: ScheduleViewerProps) {
+  const todayIndex = weekdayIndexFromIsoDate(today);
+  // Open on today rather than a hardcoded Monday; a teacher's first question is
+  // always "what do I teach today".
+  const [selectedDay, setSelectedDay] = useState(() => todayIndex ?? 1);
   const [weekIndex, setWeekIndex] = useState(0);
   const [weekMenuOpen, setWeekMenuOpen] = useState(false);
   const activeTemplate = config.daily_class[selectedDay]?.timetable ?? Object.keys(config.timetable)[0] ?? "workday";
@@ -100,13 +126,15 @@ export function ScheduleViewer({ config, user, auth, publishedAt }: ScheduleView
   return (
     <main className="viewer-shell">
       <header className="viewer-topbar">
-        <Link className="viewer-brand" href="/" aria-label="课程表首页">
+        <Link className="viewer-brand" href={basePath || "/"} aria-label="课程表首页">
           <span className="viewer-brand-mark"><CalendarClock size={18} /></span>
-          <span><strong>课程表</strong><small>已发布课表</small></span>
+          <span><strong>课程表</strong><small>{className ? `${className} · 已发布课表` : "已发布课表"}</small></span>
         </Link>
         <div className="viewer-topbar-right">
           <span className="viewer-published-status"><Send size={14} />{publishedAt ? `更新于 ${new Date(publishedAt).toLocaleString("zh-CN", { hour12: false })}` : "当前版本"}</span>
-          {user ? <UserMenu user={user} showEditorLink showAdminLink /> : <ViewerAuth corpId={auth?.corpId} clientId={auth?.clientId} />}
+          {user
+            ? <UserMenu user={user} basePath={basePath} showEditorLink showAdminLink showClassAdminLink />
+            : <ViewerAuth corpId={auth?.corpId} clientId={auth?.clientId} basePath={basePath} classId={classId} />}
         </div>
       </header>
 
@@ -174,10 +202,11 @@ export function ScheduleViewer({ config, user, auth, publishedAt }: ScheduleView
             <div className="viewer-matrix-header">
               <div className="matrix-label-cell"><span>节次</span><small>{activeTemplate}</small></div>
               {config.daily_class.map((day, dayIndex) => (
-                <div className={`day-header${selectedDay === dayIndex ? " is-selected" : ""}`} key={dayIndex}>
+                <div className={`day-header${selectedDay === dayIndex ? " is-selected" : ""}${todayIndex === dayIndex ? " is-today" : ""}`} key={dayIndex}>
                   <button type="button" aria-pressed={selectedDay === dayIndex} onClick={() => setSelectedDay(dayIndex)}>
                     <strong>{day.Chinese}</strong><span>{day.English}</span>
                   </button>
+                  {todayIndex === dayIndex ? <span className="viewer-today-mark">今天</span> : null}
                 </div>
               ))}
             </div>

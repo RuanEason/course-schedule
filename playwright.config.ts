@@ -27,6 +27,9 @@ export default defineConfig({
       DINGTALK_DEV_USER_ADMIN: "false",
       DINGTALK_DEV_USER_BOSS: "false",
       DINGTALK_DEV_USER_SENIOR: "false",
+      // The dev identity has no rows in the membership table, so it is granted
+      // the classes the multi-class specs exercise.
+      DINGTALK_DEV_USER_CLASSES: "default,class2,class3",
       APP_ORIGIN: testUrl,
     },
   },
